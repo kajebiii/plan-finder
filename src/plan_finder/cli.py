@@ -82,6 +82,13 @@ def main(
             help="Claude model to use (e.g. claude-opus-4-6, claude-sonnet-4-5-20250929).",
         ),
     ] = None,
+    review: Annotated[
+        bool,
+        typer.Option(
+            "--review",
+            help="Review pending plans interactively.",
+        ),
+    ] = False,
     clear_rejections: Annotated[
         bool,
         typer.Option(
@@ -115,6 +122,12 @@ def main(
         mgr.load()
         mgr.clear_rejections()
         console.print("[green]Rejection history cleared.[/green]")
+
+    if review:
+        from .review import run_review
+
+        run_review(effective_report_dir)
+        raise typer.Exit(0)
 
     # Auto mode requires --prompt
     if auto and not prompt:

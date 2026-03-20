@@ -72,6 +72,26 @@ class StateManager:
         self.state.total_approved += 1
         self.save()
 
+    def approve_pending(self, title: str) -> bool:
+        """Find pending record by title, mark as approved."""
+        for rec in self.state.rejected_plans:
+            if rec.title == title and rec.reason == "(pending review)":
+                rec.reason = "(approved)"
+                self.state.total_approved += 1
+                self.save()
+                return True
+        return False
+
+    def reject_pending(self, title: str, reason: str = "") -> bool:
+        """Find pending record by title, mark as rejected."""
+        for rec in self.state.rejected_plans:
+            if rec.title == title and rec.reason == "(pending review)":
+                rec.reason = reason or "(rejected)"
+                self.state.total_rejected += 1
+                self.save()
+                return True
+        return False
+
     def clear_rejections(self) -> None:
         self.state.rejected_plans.clear()
         self.save()
