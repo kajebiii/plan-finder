@@ -17,8 +17,29 @@ uv sync
 
 - Python 3.10+
 - [uv](https://docs.astral.sh/uv/) 패키지 매니저
-- [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) 인증 완료 (claude-agent-sdk가 사용)
-- [ccusage](https://github.com/ryoppippi/ccusage) — 세션 비용 자동 감지에 사용 (`brew install ccusage`)
+- 백엔드 중 하나 (기본은 Claude):
+  - **Claude** (`--backend claude`, 기본): [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) 인증 완료 (claude-agent-sdk가 사용)
+  - **Codex** (`--backend codex`): [Codex CLI](https://developers.openai.com/codex/cli) 설치 + `codex login` 완료
+- [ccusage](https://github.com/ryoppippi/ccusage) — Claude 백엔드의 세션 비용 자동 감지에 사용 (`brew install ccusage`)
+
+## 백엔드 선택 (Claude / Codex)
+
+`--backend` 옵션으로 분석에 사용할 AI를 고른다. 기본값은 `claude`다.
+
+```bash
+# Claude (기본) — claude-agent-sdk 사용
+uv run --project ~/plan-finder plan-finder --prompt "..." --max 50
+
+# Codex — codex CLI 사용 (먼저 `codex login` 필요)
+uv run --project ~/plan-finder plan-finder --backend codex --prompt "..." --max 50
+```
+
+Codex 백엔드 동작 방식:
+
+- `codex exec`를 **read-only 샌드박스**로 실행한다. 파일을 수정할 수 없다.
+- 모델·추론 강도(reasoning effort) 등은 사용자의 `~/.codex/config.toml`을 그대로 따른다. `--model gpt-5.5` 처럼 덮어쓸 수 있다.
+- 반복 간 세션 유지는 `codex exec resume`로 처리한다 (`--no-resume`으로 비활성화).
+- **비용($) 기반 쓰로틀은 사용하지 않는다.** Codex는 구독제라 사용량 한도에 도달하면 에러 메시지의 리셋 시각(`try again at 7:45 PM` 등)을 파싱해 그 시각까지 자동 대기한다.
 
 ## 빠른 시작
 
@@ -63,6 +84,8 @@ cd ~/my-project
 ```
 
 결과는 `~/claude-reports/{프로젝트명}/pending/`에 저장되고, 나중에 사람이 검토한다.
+
+Codex 백엔드로 돌리려면 인자에 `--backend codex`만 추가하면 된다. 데몬은 인자를 그대로 전달한다.
 
 ### 대화형 vs 자동 모드 비교
 
@@ -110,12 +133,13 @@ Cost: $12.50/$40 (31%) | Session: 52% (2.4h left) | 🟢 Plenty (pace 33% vs tim
 | 옵션 | 단축 | 설명 | 기본값 |
 |---|---|---|---|
 | `--prompt` | `-p` | 분석 프롬프트 | (대화형 입력) |
+| `--backend` | | AI 백엔드 (`claude` 또는 `codex`) | `claude` |
 | `--max` | `-m` | 최대 반복 횟수 | 무제한 |
 | `--report-dir` | `-d` | 리포트 저장 경로 | `~/claude-reports/{프로젝트명}` |
 | `--auto` | | 자동 모드 | 꺼짐 |
 | `--no-throttle` | | 쓰로틀링 비활성화 | 꺼짐 (기본 활성) |
 | `--session-budget` | | 세션 예산 (USD) | 40.0 |
-| `--model` | | Claude 모델 지정 (e.g. `claude-opus-4-6`) | SDK 기본값 |
+| `--model` | | 모델 지정 (Claude: `claude-opus-4-6`, Codex: `gpt-5.5` 등) | 백엔드 기본값 |
 | `--stop-at` | | 지정 시각에 종료 (HH:MM) | 없음 |
 | `--no-resume` | | 반복 간 Claude 세션 초기화 | 꺼짐 (세션 유지) |
 | `--clear-rejections` | | 거절 기록 초기화 후 시작 | |

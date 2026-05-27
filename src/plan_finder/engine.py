@@ -6,11 +6,20 @@ from pathlib import Path
 from rich.markup import escape as rich_escape
 
 from . import display
-from .discovery import discover_plan
+from .errors import RateLimitError
 from .prompts import build_prompt
 from .reporter import save_plan
 from .state import StateManager
 from .throttle import SessionThrottle
+
+
+def _resolve_backend(backend: str):
+    """Return the discover_plan coroutine for the selected backend."""
+    if backend == "codex":
+        from .codex_discovery import discover_plan
+        return discover_plan
+    from .discovery import discover_plan
+    return discover_plan
 
 
 QUIET_START = 22  # 22:00
@@ -19,6 +28,7 @@ QUIET_END = 3     # 03:00
 # Errors that indicate rate limit / session exhaustion
 _RATE_LIMIT_PATTERNS = [
     "hit your limit",
+    "usage limit",
     "rate limit",
     "rate_limit",
     "overloaded",
@@ -67,6 +77,20 @@ async def _wait_if_quiet_hours() -> None:
         display.console.print("[dim]Quiet hours over, resuming...[/dim]")
 
 
+async def _wait_until(when: object) -> None:
+    """Sleep until the given local datetime (with a small buffer)."""
+    import asyncio
+    from datetime import datetime
+
+    remaining = (when - datetime.now()).total_seconds()  # type: ignore[operator]
+    if remaining > 0:
+        display.console.print(
+            f"[dim]Waiting until {when.strftime('%H:%M')} "  # type: ignore[attr-defined]
+            f"({remaining / 60:.0f} min)...[/dim]"
+        )
+        await asyncio.sleep(remaining + 60)
+
+
 async def _wait_for_next_session(throttle: SessionThrottle | None) -> None:
     """Wait until the current session ends, then return."""
     import asyncio
@@ -100,6 +124,7 @@ async def run_discovery_loop(
     stop_at: object | None = None,  # datetime.time
     model: str | None = None,
     max_turns: int = 80,
+    backend: str = "claude",
 ) -> None:
     """Main discovery loop.
 
@@ -116,6 +141,8 @@ async def run_discovery_loop(
     to preserve codebase analysis context between iterations.
     """
     import os
+
+    discover_plan = _resolve_backend(backend)
 
     effective_cwd = cwd or os.getcwd()
     project_name = Path(effective_cwd).name
@@ -215,6 +242,21 @@ async def run_discovery_loop(
                 session_start_time = _dt.now()
                 iteration -= 1
                 continue
+            except RateLimitError as e:
+                display.console.print(
+                    f"\n[yellow]Usage limit reached: {rich_escape(str(e)[:160])}[/yellow]"
+                )
+                if e.retry_at is not None:
+                    await _wait_until(e.retry_at)
+                else:
+                    await _wait_for_next_session(throttle)
+                session_id = None
+                session_start_time = _dt.now()
+                if throttle:
+                    throttle.reinit()
+                consecutive_errors = 0
+                iteration -= 1
+                continue
             except Exception as e:
                 err_msg = str(e)
                 if _is_rate_limit_error(err_msg):
@@ -282,9 +324,12 @@ async def run_discovery_loop(
             if result.session_id:
                 session_id = result.session_id
 
+            cost_str = (
+                f"Cost: ${result.cost_usd:.2f} | " if result.cost_usd else ""
+            )
             display.console.print(
                 f"  [dim]Turns: {result.num_turns} | "
-                f"Cost: ${result.cost_usd:.2f} | "
+                f"{cost_str}"
                 f"Tokens: {result.total_tokens:,}[/dim]"
             )
 

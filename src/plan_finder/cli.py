@@ -79,9 +79,17 @@ def main(
         Optional[str],
         typer.Option(
             "--model",
-            help="Claude model to use (e.g. claude-opus-4-6, claude-sonnet-4-5-20250929).",
+            help="Model to use. Claude: claude-opus-4-6, claude-sonnet-4-5-20250929. "
+            "Codex: gpt-5.5, o3, etc. Default: backend's own default.",
         ),
     ] = None,
+    backend: Annotated[
+        str,
+        typer.Option(
+            "--backend",
+            help="AI backend: 'claude' (claude-agent-sdk) or 'codex' (codex CLI).",
+        ),
+    ] = "claude",
     max_turns: Annotated[
         int,
         typer.Option(
@@ -104,9 +112,23 @@ def main(
     files. Rejected plans are remembered and skipped in future runs.
     """
     import os
+    import shutil
 
     from .display import console, show_rejected_list
     from .state import StateManager
+
+    backend = backend.lower()
+    if backend not in ("claude", "codex"):
+        console.print(
+            f"[red]Invalid --backend: {backend}. Use 'claude' or 'codex'.[/red]"
+        )
+        raise typer.Exit(1)
+    if backend == "codex" and shutil.which("codex") is None:
+        console.print(
+            "[red]--backend codex requires the codex CLI on PATH. "
+            "Install it and run `codex login` first.[/red]"
+        )
+        raise typer.Exit(1)
 
     cwd = os.getcwd()
     project_name = Path(cwd).name
@@ -150,12 +172,21 @@ def main(
             f"Plans will be saved to [bold]{effective_report_dir / 'pending'}[/bold]"
         )
 
-    # Session info always shown; throttle waiting when auto or --throttle
-    from .throttle import SessionThrottle
+    # Cost-based throttling is driven by ccusage, which tracks Claude usage only.
+    # Codex is subscription-based, so its throttle is disabled; the engine instead
+    # waits for the reset time reported in Codex's usage-limit errors.
+    session_throttle = None
+    throttle_enabled = False
+    if backend == "claude":
+        from .throttle import SessionThrottle
 
-    session_throttle = SessionThrottle(
-        session_budget=session_budget,
-    )
+        session_throttle = SessionThrottle(session_budget=session_budget)
+        throttle_enabled = not no_throttle
+    elif no_throttle is False:
+        console.print(
+            "[dim]Codex backend: cost throttle disabled "
+            "(relies on usage-limit reset times).[/dim]"
+        )
 
     from .engine import run_discovery_loop
 
@@ -178,11 +209,12 @@ def main(
             cwd=cwd,
             auto=auto,
             throttle=session_throttle,
-            throttle_enabled=not no_throttle,
+            throttle_enabled=throttle_enabled,
             resume=not no_resume,
             stop_at=stop_at_time,
             model=model,
             max_turns=max_turns,
+            backend=backend,
         )
     )
 
