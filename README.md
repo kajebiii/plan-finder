@@ -24,6 +24,33 @@ uv sync
 
 개선점을 찾고 싶은 프로젝트 디렉토리에서 실행한다.
 
+### 프롬프트 지정 방법
+
+**직접 입력:**
+
+```bash
+cd ~/my-project
+uv run --project ~/plan-finder plan-finder \
+  --prompt "코드베이스에서 임의의 개선점을 찾아서 제안해줘. 코드 품질, 버그, 리팩토링, 성능 등 어떤 종류도 좋다." \
+  --max 50
+```
+
+**preset 사용:**
+
+미리 정의된 preset이 있으면 이름으로 바로 적용할 수 있다. 이름이 정확히 일치해야 하며, 없으면 에러가 발생한다.
+
+```bash
+# 사용 가능한 preset 목록 확인
+uv run --project ~/plan-finder plan-finder --preset ?
+
+# preset 적용
+uv run --project ~/plan-finder plan-finder --preset unity --max 50
+```
+
+**대화형 입력 (프롬프트/preset 미지정 시):**
+
+`--prompt`와 `--preset`을 모두 생략하면 프로젝트 타입과 집중 영역을 대화형으로 입력받아 프롬프트를 생성한다.
+
 ### 대화형으로 직접 검토하기
 
 ```bash
@@ -110,12 +137,14 @@ Cost: $12.50/$40 (31%) | Session: 52% (2.4h left) | 🟢 Plenty (pace 33% vs tim
 | 옵션 | 단축 | 설명 | 기본값 |
 |---|---|---|---|
 | `--prompt` | `-p` | 분석 프롬프트 | (대화형 입력) |
+| `--preset` | | Preset 이름 지정. `?`를 입력하면 목록 표시 | 없음 |
 | `--max` | `-m` | 최대 반복 횟수 | 무제한 |
 | `--report-dir` | `-d` | 리포트 저장 경로 | `~/claude-reports/{프로젝트명}` |
 | `--auto` | | 자동 모드 | 꺼짐 |
 | `--no-throttle` | | 쓰로틀링 비활성화 | 꺼짐 (기본 활성) |
 | `--session-budget` | | 세션 예산 (USD) | 40.0 |
 | `--model` | | Claude 모델 지정 (e.g. `claude-opus-4-6`) | SDK 기본값 |
+| `--max-turns` | | Claude 쿼리당 최대 턴 수 | 80 |
 | `--stop-at` | | 지정 시각에 종료 (HH:MM) | 없음 |
 | `--no-resume` | | 반복 간 Claude 세션 초기화 | 꺼짐 (세션 유지) |
 | `--clear-rejections` | | 거절 기록 초기화 후 시작 | |

@@ -24,6 +24,13 @@ def main(
             help="Plan prompt. If omitted, you'll be asked interactively.",
         ),
     ] = None,
+    preset: Annotated[
+        Optional[str],
+        typer.Option(
+            "--preset",
+            help="Preset name to use (e.g. unity). Lists available presets if value is '?'.",
+        ),
+    ] = None,
     max_iterations: Annotated[
         Optional[int],
         typer.Option(
@@ -121,9 +128,9 @@ def main(
         mgr.clear_rejections()
         console.print("[green]Rejection history cleared.[/green]")
 
-    # Auto mode requires --prompt
-    if auto and not prompt:
-        console.print("[red]--auto requires --prompt. Exiting.[/red]")
+    # Auto mode requires --prompt or --preset
+    if auto and not prompt and not preset:
+        console.print("[red]--auto requires --prompt or --preset. Exiting.[/red]")
         raise typer.Exit(1)
 
     # Show existing rejections if any
@@ -131,18 +138,69 @@ def main(
     mgr.load()
     show_rejected_list(mgr.state.rejected_plans)
 
-    # Prompt required: ask interactively if not provided via --prompt
-    if prompt is None:
-        console.print()
-        console.print(
-            "[bold]Enter your plan prompt[/bold]\n"
-            "[dim](e.g. 'Find any improvement and propose a plan')[/dim]"
-        )
-        from .display import _raw_input
-        prompt = _raw_input(": ")
-        if not prompt.strip():
-            console.print("[red]Prompt is required. Exiting.[/red]")
+    from .preset import list_presets, load_preset
+    from .display import _raw_input
+
+    # --preset=? : list available presets and exit
+    if preset == "?":
+        available = list_presets()
+        if not available:
+            console.print("[yellow]No presets found.[/yellow]")
+        else:
+            console.print("\n[bold]Available presets:[/bold]")
+            for p in available:
+                console.print(f"  [cyan]{p.name}[/cyan] — {p.description}")
+        raise typer.Exit(0)
+
+    # --preset=<name> : load preset (alone, or combined with --prompt)
+    if preset is not None:
+        loaded = load_preset(preset)
+        if loaded is None:
+            available = list_presets()
+            console.print(f"[red]Preset '{preset}' not found.[/red]")
+            if available:
+                names = ", ".join(p.name for p in available)
+                console.print(f"[dim]Available: {names}[/dim]")
             raise typer.Exit(1)
+        console.print(f"\n[bold green]Using preset:[/bold green] {loaded.title}")
+        if prompt is None:
+            prompt = loaded.prompt
+        else:
+            console.print("[dim]Combining preset with --prompt (preset first, then --prompt).[/dim]")
+            prompt = f"{loaded.prompt}\n\n{prompt}"
+
+    # No prompt and no preset: interactive flow
+    if prompt is None:
+        available = list_presets()
+
+        if available:
+            console.print("\n[bold]Available presets:[/bold]")
+            for p in available:
+                console.print(f"  [cyan]{p.name}[/cyan] — {p.description}")
+            console.print()
+
+        console.print("[bold]What kind of project is this?[/bold]")
+        console.print("[dim](framework, language, domain — e.g. Unity mobile game, Python backend API)[/dim]")
+        project_type = _raw_input(": ").strip()
+        if not project_type:
+            console.print("[red]Input is required. Exiting.[/red]")
+            raise typer.Exit(1)
+
+        console.print()
+        console.print("[bold]What areas should we focus on?[/bold]")
+        console.print("[dim](e.g. performance, code quality, bugs, architecture)[/dim]")
+        focus = _raw_input(": ").strip()
+
+        parts = [f"This is a {project_type} project."]
+        if focus:
+            parts.append(f"Focus on {focus}.")
+        else:
+            parts.append("Find general code improvements.")
+        prompt = " ".join(parts)
+
+    if not prompt.strip():
+        console.print("[red]Prompt is required. Exiting.[/red]")
+        raise typer.Exit(1)
 
     if auto:
         console.print(
