@@ -15,22 +15,19 @@ run_daemon() {
     TARGET_TIME=""
     if [ -f "$HOME/.plan-finder-daemon.target-time" ]; then
         TARGET_TIME=$(cat "$HOME/.plan-finder-daemon.target-time")
-        rm -f "$HOME/.plan-finder-daemon.target-time"
     fi
 
     CWD=""
     if [ -f "$HOME/.plan-finder-daemon.cwd" ]; then
         CWD=$(cat "$HOME/.plan-finder-daemon.cwd")
-        rm -f "$HOME/.plan-finder-daemon.cwd"
     fi
 
-    # Read args from file (one arg per line) — save before rm
+    # Persistent config files (kept across runs so launchd KeepAlive can re-read on restart)
     PF_ARGS=()
     if [ -f "$ARGS_FILE" ]; then
         while IFS= read -r line; do
             PF_ARGS+=("$line")
         done < "$ARGS_FILE"
-        rm -f "$ARGS_FILE"
     fi
 
     log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
