@@ -152,6 +152,7 @@ Cost: $12.50/$40 (31%) | Session: 52% (2.4h left) | 🟢 Plenty (pace 33% vs tim
 
 - 로그: `~/.plan-finder-daemon.log`
 - PID: `~/.plan-finder-daemon.pid`
+- 인자/타겟 시각/cwd: `~/.plan-finder-daemon.args`, `~/.plan-finder-daemon.target-time`, `~/.plan-finder-daemon.cwd`
 
 > **참고**: `crontab`은 Claude CLI 인증 환경을 상속받지 못해 동작하지 않는다. 반드시 데몬 스크립트를 사용해야 한다.
 
@@ -193,6 +194,69 @@ Cost: $12.50/$40 (31%) | Session: 52% (2.4h left) | 🟢 Plenty (pace 33% vs tim
 5. 22:00~03:00 쉬는 시간에는 쿼리를 보내지 않고 자동 대기
 6. Rate limit 도달 시 세션 종료까지 자동 대기 후 재시도
 7. 분석 중 Claude가 사용하는 도구(Read, Grep 등)를 실시간 표시
+
+## macOS — launchctl로 데몬 관리
+
+macOS에서는 launchd LaunchAgent로 등록해두면 로그인 시 자동 시작 + 죽으면 자동 재시작된다. plist 예시 (`~/Library/LaunchAgents/com.user.planfinder.plist`):
+
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.user.planfinder</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/YOUR_USER/plan-finder/plan-finder-daemon.sh</string>
+        <string>_run</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/Users/YOUR_USER</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/YOUR_USER/.local/bin:/etc/profiles/per-user/YOUR_USER/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/YOUR_USER</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <key>StandardOutPath</key>
+    <string>/Users/YOUR_USER/.plan-finder-daemon.out</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/YOUR_USER/.plan-finder-daemon.err</string>
+</dict>
+</plist>
+```
+
+데몬 인자(target time, cwd, prompt 등)는 plist에 박지 않고 한 번 `daemon.sh start --at HH:MM -- ...`로 띄워서 `~/.plan-finder-daemon.{args,target-time,cwd}` 파일에 저장해두면, launchd가 재시작해도 같은 설정으로 다시 돈다.
+
+```bash
+# 등록 + 즉시 시작
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.planfinder.plist
+
+# 상태 확인
+launchctl list | grep planfinder
+
+# 일시 중지 (재부팅 시 다시 자동 시작됨)
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.user.planfinder.plist
+
+# 영구 비활성 (재부팅에도 살아남음)
+launchctl bootout gui/$(id -u) ~/Library/LaunchAgents/com.user.planfinder.plist
+launchctl disable gui/$(id -u)/com.user.planfinder
+
+# 다시 활성화
+launchctl enable gui/$(id -u)/com.user.planfinder
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.user.planfinder.plist
+```
+
+> **주의**: `KeepAlive=true` 상태에서는 `daemon.sh stop`만으로는 영구히 끌 수 없다. launchd가 즉시 다시 띄우므로 위의 `bootout` + `disable`을 써야 한다.
 
 ## 라이선스
 
