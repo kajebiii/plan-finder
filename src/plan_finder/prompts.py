@@ -18,7 +18,10 @@ IMPORTANT RULES:
 """
 
 _REJECTION_CONTEXT_TEMPLATE = """
-PREVIOUSLY REJECTED PLANS (do NOT suggest these or similar ideas again):
+PREVIOUSLY PROPOSED PLANS (do NOT suggest these or similar ideas again).
+If a title below looks close to your idea, READ the .md file FIRST to confirm
+overlap. If it overlaps, set found_nothing=true or refine your proposal to a
+genuinely different finding.
 {rejections}
 """
 
@@ -41,6 +44,8 @@ def build_prompt(
             )
         for i, r in enumerate(recent, 1):
             lines.append(f"  {i}. [{r.category}] {r.title}")
+            if r.markdown_path:
+                lines.append(f"      → {r.markdown_path}")
         rejection_text = _REJECTION_CONTEXT_TEMPLATE.format(
             rejections="\n".join(lines)
         )
