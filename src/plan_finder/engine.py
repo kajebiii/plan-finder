@@ -354,7 +354,7 @@ async def run_discovery_loop(
                 filepath = save_plan(
                     result.plan, iteration, report_dir, pending=True
                 )
-                state_mgr.add_pending(result.plan)
+                state_mgr.add_pending(result.plan, markdown_path=str(filepath))
                 session_pending += 1
                 display.show_saved_pending(filepath)
             else:
@@ -364,7 +364,9 @@ async def run_discovery_loop(
 
                     if action == "approve":
                         filepath = save_plan(current_plan, iteration, report_dir)
-                        state_mgr.record_approval(current_plan)
+                        state_mgr.record_approval(
+                            current_plan, markdown_path=str(filepath)
+                        )
                         session_approved += 1
                         display.show_saved(filepath)
                         break

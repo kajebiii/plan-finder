@@ -49,24 +49,30 @@ class StateManager:
         self.state.total_rejected += 1
         self.save()
 
-    def add_pending(self, plan: DiscoveredPlan) -> None:
+    def add_pending(
+        self, plan: DiscoveredPlan, markdown_path: str | None = None
+    ) -> None:
         record = RejectionRecord(
             title=plan.title,
             category=plan.category.value,
             description_summary=plan.description[:200],
             rejected_at=datetime.now(),
             reason="(pending review)",
+            markdown_path=markdown_path,
         )
         self.state.rejected_plans.append(record)
         self.save()
 
-    def record_approval(self, plan: DiscoveredPlan) -> None:
+    def record_approval(
+        self, plan: DiscoveredPlan, markdown_path: str | None = None
+    ) -> None:
         record = RejectionRecord(
             title=plan.title,
             category=plan.category.value,
             description_summary=plan.description[:200],
             rejected_at=datetime.now(),
             reason="(approved)",
+            markdown_path=markdown_path,
         )
         self.state.rejected_plans.append(record)
         self.state.total_approved += 1
