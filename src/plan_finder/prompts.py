@@ -41,6 +41,8 @@ def build_prompt(
             )
         for i, r in enumerate(recent, 1):
             lines.append(f"  {i}. [{r.category}] {r.title}")
+            if r.files_affected:
+                lines.append(f"      files: {', '.join(r.files_affected[:3])}")
         rejection_text = _REJECTION_CONTEXT_TEMPLATE.format(
             rejections="\n".join(lines)
         )
