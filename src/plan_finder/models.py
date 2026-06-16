@@ -67,7 +67,6 @@ class RejectionRecord(BaseModel):
     description_summary: str
     rejected_at: datetime
     reason: str = ""
-    files_affected: list[str] = Field(default_factory=list)
 
 
 class PlanFinderState(BaseModel):

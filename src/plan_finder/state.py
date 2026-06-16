@@ -44,7 +44,6 @@ class StateManager:
             description_summary=plan.description[:200],
             rejected_at=datetime.now(),
             reason=reason,
-            files_affected=plan.files_affected[:3],
         )
         self.state.rejected_plans.append(record)
         self.state.total_rejected += 1
@@ -57,7 +56,6 @@ class StateManager:
             description_summary=plan.description[:200],
             rejected_at=datetime.now(),
             reason="(pending review)",
-            files_affected=plan.files_affected[:3],
         )
         self.state.rejected_plans.append(record)
         self.save()
@@ -69,7 +67,6 @@ class StateManager:
             description_summary=plan.description[:200],
             rejected_at=datetime.now(),
             reason="(approved)",
-            files_affected=plan.files_affected[:3],
         )
         self.state.rejected_plans.append(record)
         self.state.total_approved += 1
