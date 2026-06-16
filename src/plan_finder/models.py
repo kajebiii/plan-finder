@@ -67,6 +67,7 @@ class RejectionRecord(BaseModel):
     description_summary: str
     rejected_at: datetime
     reason: str = ""
+    markdown_path: str | None = None
 
 
 class PlanFinderState(BaseModel):
