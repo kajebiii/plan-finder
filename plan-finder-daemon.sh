@@ -7,6 +7,7 @@
 PID_FILE="$HOME/.plan-finder-daemon.pid"
 LOG_FILE="$HOME/.plan-finder-daemon.log"
 ARGS_FILE="$HOME/.plan-finder-daemon.args"
+PRE_HOOK_FILE="$HOME/.plan-finder-daemon.pre-hook"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 run_daemon() {
@@ -67,6 +68,15 @@ run_daemon() {
                     continue
                 fi
             fi
+        fi
+
+        # Pre-run hook (optional). Lives at $PRE_HOOK_FILE so the daemon stays
+        # project-agnostic — put repo pulls, secret refresh, etc. in that file.
+        # Failures are logged but never abort the run.
+        if [ -f "$PRE_HOOK_FILE" ]; then
+            log "Running pre-hook: $PRE_HOOK_FILE"
+            bash "$PRE_HOOK_FILE" >> "$LOG_FILE" 2>&1 \
+                || log "pre-hook failed (continuing anyway)"
         fi
 
         log "Starting plan-finder with args: ${PF_ARGS[*]}"

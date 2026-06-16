@@ -153,8 +153,29 @@ Cost: $12.50/$40 (31%) | Session: 52% (2.4h left) | 🟢 Plenty (pace 33% vs tim
 - 로그: `~/.plan-finder-daemon.log`
 - PID: `~/.plan-finder-daemon.pid`
 - 인자/타겟 시각/cwd: `~/.plan-finder-daemon.args`, `~/.plan-finder-daemon.target-time`, `~/.plan-finder-daemon.cwd`
+- (선택) 사전 훅: `~/.plan-finder-daemon.pre-hook` — [아래 섹션 참고](#사전-훅-pre-hook)
 
 > **참고**: `crontab`은 Claude CLI 인증 환경을 상속받지 못해 동작하지 않는다. 반드시 데몬 스크립트를 사용해야 한다.
+
+### 사전 훅 (pre-hook)
+
+데몬이 매 iteration의 `plan-finder` 실행 직전에 자동으로 호출하는 사용자 정의 훅. 파일이 있으면 `bash`로 실행하고, 없으면 그냥 건너뛴다. 데몬 자체는 프로젝트를 모르고 훅이 알기 때문에, 분석 대상 레포 pull, 시크릿 갱신, 캐시 워밍 등 사이드카 작업을 자유롭게 끼울 수 있다.
+
+```bash
+cat > ~/.plan-finder-daemon.pre-hook <<'EOF'
+#!/bin/bash
+# 예: 분석할 spec/문서 레포를 최신화한 뒤 plan-finder가 깬다
+git -C ~/question/cc-spec pull --ff-only --quiet
+EOF
+chmod +x ~/.plan-finder-daemon.pre-hook
+```
+
+특징:
+
+- **실패해도 plan-finder는 계속 실행** — 훅 exit 코드가 0이 아니면 로그에 `pre-hook failed (continuing anyway)`로만 남기고 진행. 네트워크 일시 장애로 새벽 작업이 통째로 날아가지 않게 함.
+- **stdout/stderr 전부 `~/.plan-finder-daemon.log`로** 흡수. 별도 로그 파일을 만들고 싶으면 훅 안에서 리다이렉트.
+- **PATH는 데몬과 동일** — `~/.local/bin`, Homebrew, Nix 등 데몬이 export한 PATH가 그대로 보임.
+- **`$HOME`에 두는 이유**: 다른 데몬 설정 파일(`args`, `target-time`, `cwd`)과 위치를 맞춤. 레포에 커밋되는 파일이 아니므로 `.gitignore` 추가는 불필요.
 
 ## 옵션 전체 목록
 
