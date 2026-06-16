@@ -25,6 +25,10 @@ PREVIOUSLY REJECTED PLANS (do NOT suggest these or similar ideas again):
 
 MAX_REJECTIONS_IN_PROMPT = 50
 
+# Reasons set internally by the state machine — these carry no user feedback,
+# so surfacing them in the dedup prompt would just add noise.
+_SYSTEM_REASONS = frozenset({"(pending review)", "(approved)", "(rejected)"})
+
 
 def build_prompt(
     user_prompt: str,
@@ -41,6 +45,8 @@ def build_prompt(
             )
         for i, r in enumerate(recent, 1):
             lines.append(f"  {i}. [{r.category}] {r.title}")
+            if r.reason and r.reason not in _SYSTEM_REASONS:
+                lines.append(f"      user feedback: {r.reason}")
         rejection_text = _REJECTION_CONTEXT_TEMPLATE.format(
             rejections="\n".join(lines)
         )
