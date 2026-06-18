@@ -20,7 +20,7 @@ uv sync
 - 백엔드 중 하나 (기본은 Claude):
   - **Claude** (`--backend claude`, 기본): [Claude CLI](https://docs.anthropic.com/en/docs/claude-code) 인증 완료 (claude-agent-sdk가 사용)
   - **Codex** (`--backend codex`): [Codex CLI](https://developers.openai.com/codex/cli) 설치 + `codex login` 완료
-- [ccusage](https://github.com/ryoppippi/ccusage) — Claude 백엔드의 세션 비용 자동 감지에 사용 (`brew install ccusage`)
+- Claude Code 로그인 완료 — 쓰로틀이 `~/.claude/.credentials.json` (macOS는 Keychain의 `Claude Code-credentials`)의 OAuth 토큰을 그대로 재사용한다. `claude login` 으로 세팅.
 
 ## 백엔드 선택 (Claude / Codex)
 
@@ -39,7 +39,7 @@ Codex 백엔드 동작 방식:
 - `codex exec`를 **read-only 샌드박스**로 실행한다. 파일을 수정할 수 없다.
 - 모델·추론 강도(reasoning effort) 등은 사용자의 `~/.codex/config.toml`을 그대로 따른다. `--model gpt-5.5` 처럼 덮어쓸 수 있다.
 - 반복 간 세션 유지는 `codex exec resume`로 처리한다 (`--no-resume`으로 비활성화).
-- **비용($) 기반 쓰로틀은 사용하지 않는다.** Codex는 구독제라 사용량 한도에 도달하면 에러 메시지의 리셋 시각(`try again at 7:45 PM` 등)을 파싱해 그 시각까지 자동 대기한다.
+- **OAuth-based 쓰로틀은 Claude 백엔드 전용**이다. Codex는 구독제라 별도 throttle 없이, 사용량 한도 에러 메시지의 리셋 시각(`try again at 7:45 PM` 등)을 파싱해 그 시각까지 자동 대기한다.
 
 ## 빠른 시작
 
@@ -125,22 +125,27 @@ Codex 백엔드로 돌리려면 인자에 `--backend codex`만 추가하면 된�
 
 ## 쓰로틀링
 
-세션 비용($)을 기준으로 속도를 조절한다. [ccusage](https://github.com/ryoppippi/ccusage)에서 현재 세션의 사용 비용을 자동 감지한다.
+Anthropic이 직접 알려주는 **세션(5h) / 주간(7d) 사용량 %**을 기준으로 속도를 조절한다. `https://api.anthropic.com/api/oauth/usage` 엔드포인트를 호출해 `five_hour.utilization`, `seven_day.utilization` 와 각각의 `resets_at`을 받아온다. 별도 cost 추정/예산 설정 없이 서버가 권위적으로 답한다.
 
-- **공식**: `(사용 비용 / 세션 예산) * 1.05 < (경과 시간 / 세션 시간)`
-- **기본 예산**: $40 (`--session-budget`으로 조절)
-- 세션 전체 비용을 추적하므로 다른 Claude 작업의 사용분도 반영됨
+- **트리거 조건**: `session_pct ≥ target` 또는 `weekly_pct ≥ target` 일 때 가장 가까운 reset 시각까지 sleep
+- **기본 target**: 95% (`--throttle-target-pct`로 조절). weekly만 따로 두려면 `--throttle-weekly-pct` 추가
+- **자격증명**: macOS는 Keychain의 `Claude Code-credentials`, 그 외엔 `~/.claude/.credentials.json` (Claude Code 로그인 시 자동 작성)
+- **호출 비용**: 1 HTTP 호출 / 60s 캐시 — 무시할 수 있는 오버헤드
 - 매 iteration마다 상태 표시:
 
 ```
-Cost: $12.50/$40 (31%) | Session: 52% (2.4h left) | 🟢 Plenty (pace 33% vs time 52%) | Model: claude-opus-4-6
+Session 23% (resets 13:00) | Weekly 19% (resets 06-24 12:00) | 🟢 Plenty | Model: claude-opus-4-8
 ```
 
-상태 표시등:
-- 🟢 Plenty — 여유 (margin > 15%p)
-- 🟡 OK — 괜찮음 (margin > 5%p)
-- 🟠 Tight — 빡빡함 (margin > 0)
-- 🔴 Over — 초과, 쓰로틀 대기 중
+상태 표시등 (둘 중 높은 % 기준):
+- 🟢 Plenty — < 50%
+- 🟡 OK — < 75%
+- 🟠 Tight — < 90%
+- 🔴 High — ≥ 90% (target 95에 근접)
+
+throttle이 자격증명을 못 찾거나 endpoint가 실패하면 **graceful degrade**: 메시지만 남기고 plan-finder 자체는 정상 진행 (throttle 비활성). 메시지 예: `Throttle disabled: credentials missing — run claude login`.
+
+> **참고**: `/api/oauth/usage`는 Anthropic 미공식 endpoint (codexbar 프로젝트에서 발견). 응답 스키마나 베타 헤더(`anthropic-beta: oauth-2025-04-20`)는 변경될 수 있다. 깨지면 throttle만 비활성화되고 plan-finder 자체는 계속 동작.
 
 ## 쉬는 시간
 
@@ -188,7 +193,9 @@ chmod +x ~/.plan-finder-daemon.pre-hook
 | `--report-dir` | `-d` | 리포트 저장 경로 | `~/claude-reports/{프로젝트명}` |
 | `--auto` | | 자동 모드 | 꺼짐 |
 | `--no-throttle` | | 쓰로틀링 비활성화 | 꺼짐 (기본 활성) |
-| `--session-budget` | | 세션 예산 (USD) | 40.0 |
+| `--throttle-target-pct` | | session/weekly 공통 target % | 95.0 |
+| `--throttle-weekly-pct` | | weekly 별도 target (생략 시 위와 동일) | 없음 |
+| `--session-budget` | | **[Deprecated]** 효과 없음. 데몬 args 호환용 잔존 | 40.0 |
 | `--model` | | 모델 지정 (Claude: `claude-opus-4-6`, Codex: `gpt-5.5` 등) | 백엔드 기본값 |
 | `--max-turns` | | Claude 쿼리당 최대 턴 수 | 80 |
 | `--stop-at` | | 지정 시각에 종료 (HH:MM) | 없음 |
@@ -211,7 +218,7 @@ chmod +x ~/.plan-finder-daemon.pre-hook
 1. Claude가 프로젝트 코드를 읽고 개선점 1개를 구조화된 JSON으로 반환
 2. 이전에 거절/승인/보류된 plan 목록을 프롬프트에 포함하여 중복 제안 방지
 3. 반복 간 Claude 세션을 유지하여 코드베이스 분석 컨텍스트를 재활용 (`--no-resume`으로 비활성화 가능)
-4. 쓰로틀은 비용($) 기반: `(비용/예산) * 1.05 < (경과/세션)` — 세션 전체 비용(ccusage)을 기준으로 속도 조절
+4. 쓰로틀은 Anthropic의 `/api/oauth/usage` % 기반: `session_pct ≥ target` 또는 `weekly_pct ≥ target` 이면 가장 가까운 reset 시각까지 sleep
 5. 22:00~03:00 쉬는 시간에는 쿼리를 보내지 않고 자동 대기
 6. Rate limit 도달 시 세션 종료까지 자동 대기 후 재시도
 7. 분석 중 Claude가 사용하는 도구(Read, Grep 등)를 실시간 표시

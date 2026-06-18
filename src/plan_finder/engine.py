@@ -186,17 +186,11 @@ async def run_discovery_loop(
             # Quiet hours: no queries 22:00~03:00
             await _wait_if_quiet_hours()
 
-            # Auto-reinit throttle if session expired (crossed 5h boundary)
-            if throttle and throttle.session_ready:
-                from datetime import datetime
-                if datetime.now() > throttle.session_end:
-                    display.console.print(
-                        "[dim]Session expired, re-detecting...[/dim]"
-                    )
-                    throttle.reinit()
-
-            # Throttle: wait if consuming budget faster than time
+            # Refresh the OAuth utilization snapshot (cheap, in-memory cached;
+            # only hits Anthropic when the cache TTL has elapsed). Then sleep
+            # if either session or weekly utilization has reached target.
             if throttle_enabled and throttle:
+                throttle.refresh()
                 await throttle.wait_if_needed()
 
             display.show_discovery_start(iteration)
