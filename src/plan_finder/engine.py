@@ -195,6 +195,13 @@ async def run_discovery_loop(
                     )
                     throttle.reinit()
 
+            # Retry session detection if startup found no active block. ccusage
+            # only creates an active block after the first Claude request lands,
+            # so a fresh plan-finder run started just before the session begins
+            # would otherwise stay throttle-disabled for the rest of the run.
+            if throttle and not throttle.session_ready:
+                throttle.try_attach()
+
             # Throttle: wait if consuming budget faster than time
             if throttle_enabled and throttle:
                 await throttle.wait_if_needed()

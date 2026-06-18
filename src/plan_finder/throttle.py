@@ -37,19 +37,26 @@ def detect_session() -> dict:
     Raises CcusageNotInstalled if ccusage is missing.
     Raises NoActiveSession if no active block found.
     """
+    # ccusage scans every JSONL transcript under ~/.claude — heavy users (many
+    # GB of history) regularly cross the old 30s budget, which silently
+    # disabled throttling forever. 120s gives the scan room while still
+    # bounding worst-case iteration overhead.
+    _CCUSAGE_TIMEOUT_SECS = 120
     try:
         json_result = subprocess.run(
             ["ccusage", "blocks", "--json", "--active"],
             capture_output=True,
             text=True,
-            timeout=30,
+            timeout=_CCUSAGE_TIMEOUT_SECS,
         )
     except FileNotFoundError:
         raise CcusageNotInstalled(
             "ccusage is required but not installed. Install it with: brew install ccusage"
         )
     except subprocess.TimeoutExpired:
-        raise NoActiveSession("ccusage timed out (30s). Skipping session detection.")
+        raise NoActiveSession(
+            f"ccusage timed out ({_CCUSAGE_TIMEOUT_SECS}s). Skipping session detection."
+        )
 
     if json_result.returncode != 0:
         raise NoActiveSession(
@@ -130,6 +137,48 @@ class SessionThrottle:
         self.cumulative_cost = 0.0
         self.cumulative_tokens = 0
         self._init_session()
+
+    def try_attach(self, min_retry_interval_secs: float = 60.0) -> bool:
+        """Silent retry of session detection.
+
+        ccusage only registers an active block after the first Claude request
+        lands, so a plan-finder run kicked off just before that returns no
+        active block at startup and would otherwise stay disabled forever.
+        Iterations call this each turn until a session shows up; it stays quiet
+        on failure and logs once on success.
+
+        Backed off by `min_retry_interval_secs` so a broken/slow ccusage
+        doesn't burn the full timeout on every iteration. Returns True if a
+        session was attached this call (or was already attached), False
+        otherwise.
+        """
+        if self.session_ready:
+            return True
+        now = datetime.now()
+        last = getattr(self, "_last_attach_attempt", None)
+        if last and (now - last).total_seconds() < min_retry_interval_secs:
+            return False
+        self._last_attach_attempt = now
+        try:
+            info = detect_session()
+        except NoActiveSession:
+            return False
+        self.session_ready = True
+        self.session_start = info["session_start"]
+        self.session_end = info["session_end"]
+        self.session_duration = self.session_end - self.session_start
+        self.cumulative_cost = info["cost_usd"]
+        models = [m for m in info.get("models", []) if m != "<synthetic>"]
+        if models and self.model is None:
+            self.model = models[0]
+        display.console.print(
+            f"[dim]Session now active via ccusage: "
+            f"{self.session_start.strftime('%H:%M')} ~ "
+            f"{self.session_end.strftime('%H:%M')}, "
+            f"${self.cumulative_cost:.2f}/${self.session_budget:.0f} spent — "
+            f"throttle armed.[/dim]"
+        )
+        return True
 
     def add_usage(self, cost_usd: float, tokens: int, model: str | None = None) -> None:
         self.cumulative_cost += cost_usd
