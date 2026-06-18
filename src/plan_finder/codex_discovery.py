@@ -217,6 +217,7 @@ async def discover_plan(
     on_activity: Callable[[str], None] | None = None,
     model: str | None = None,
     max_turns: int = 80,  # accepted for interface parity; Codex self-manages turns
+    effort: str | None = None,  # accepted for interface parity; Codex sets reasoning via its own config
 ) -> DiscoveryResult:
     """Run a single Codex query to discover one improvement plan."""
     import os
