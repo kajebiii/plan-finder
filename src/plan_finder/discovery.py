@@ -35,6 +35,7 @@ async def discover_plan(
     on_activity: Callable[[str], None] | None = None,
     model: str | None = None,
     max_turns: int = 80,
+    effort: str | None = None,
 ) -> DiscoveryResult:
     """Run a single Claude query to discover one improvement plan."""
     import asyncio
@@ -60,6 +61,11 @@ async def discover_plan(
 
     if model:
         options.model = model
+
+    if effort:
+        # Claude CLI accepts `--effort <level>` (low/medium/high/xhigh).
+        # claude-agent-sdk passes extra_args through verbatim.
+        options.extra_args = {**(options.extra_args or {}), "effort": effort}
 
     if resume_session_id:
         options.resume = resume_session_id

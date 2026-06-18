@@ -104,6 +104,16 @@ def main(
             help="Max turns per Claude query. Default 80.",
         ),
     ] = 80,
+    effort: Annotated[
+        Optional[str],
+        typer.Option(
+            "--effort",
+            help="Reasoning effort for the Claude session: low / medium / high "
+            "/ xhigh. Passed through to `claude --effort <level>`. Default: "
+            "the Claude CLI's own default. Ignored for Codex backend "
+            "(Codex sets reasoning effort via its own config).",
+        ),
+    ] = None,
     clear_rejections: Annotated[
         bool,
         typer.Option(
@@ -273,6 +283,7 @@ def main(
             model=model,
             max_turns=max_turns,
             backend=backend,
+            effort=effort,
         )
     )
 
