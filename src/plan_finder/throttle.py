@@ -24,6 +24,15 @@ from .oauth_usage import (
 
 DEFAULT_TARGET_PCT = 95.0
 
+# Window durations Anthropic uses for the OAuth utilization endpoint.
+_SESSION_WINDOW_SECS = 5 * 60 * 60
+_WEEKLY_WINDOW_SECS = 7 * 24 * 60 * 60
+
+# Time-proportional pacing: keep `usage_pct * 1.05` below `elapsed_pct` so the
+# budget is spent roughly evenly across the window. Matches the original
+# ccusage-era formula.
+_PACE_MARGIN = 1.05
+
 _MIN_WAIT_SECS = 60
 _MAX_WAIT_SECS = 30 * 60
 
@@ -137,36 +146,50 @@ class SessionThrottle:
         return True
 
     def is_allowed(self) -> bool:
-        """True when both session and weekly utilization are below target,
-        or when throttle is disabled (graceful no-op)."""
+        """Allowed when neither window has reached its hard target AND each
+        window's utilization is paced under its elapsed share of time.
+
+        Pacing per window:
+            usage_pct * _PACE_MARGIN <= elapsed_pct
+
+        which is the original ccusage-era formula carried over verbatim.
+        """
         snapshot = self.last_snapshot
         if snapshot is None:
             return True
-        if (
-            snapshot.five_hour_pct is not None
-            and snapshot.five_hour_pct >= self.target_session_pct
-        ):
-            return False
-        if (
-            snapshot.seven_day_pct is not None
-            and snapshot.seven_day_pct >= self.target_weekly_pct
-        ):
-            return False
-        return True
+        return self._window_allowed(
+            snapshot.five_hour_pct,
+            snapshot.five_hour_resets_at,
+            _SESSION_WINDOW_SECS,
+            self.target_session_pct,
+        ) and self._window_allowed(
+            snapshot.seven_day_pct,
+            snapshot.seven_day_resets_at,
+            _WEEKLY_WINDOW_SECS,
+            self.target_weekly_pct,
+        )
 
     async def wait_if_needed(self) -> None:
-        """Sleep until the soonest reset of an exceeded window, refresh, repeat
-        until allowed. No-op when disabled or already allowed."""
+        """Sleep until the throttle re-opens, then refresh."""
         while not self.is_allowed():
-            wait_secs = self._seconds_until_next_reset()
+            wait_secs = self._seconds_until_allowed()
             wait_secs = max(_MIN_WAIT_SECS, min(_MAX_WAIT_SECS, wait_secs))
             snapshot = self.last_snapshot
             now_str = datetime.now().strftime("%H:%M:%S")
+            s_pct = snapshot.five_hour_pct or 0
+            w_pct = snapshot.seven_day_pct or 0
+            s_elapsed = self._window_elapsed_pct(
+                snapshot.five_hour_resets_at, _SESSION_WINDOW_SECS
+            )
+            w_elapsed = self._window_elapsed_pct(
+                snapshot.seven_day_resets_at, _WEEKLY_WINDOW_SECS
+            )
             display.console.print(
                 f"\n[yellow][{now_str}] Throttling: "
-                f"session {snapshot.five_hour_pct or 0:.0f}% / "
-                f"weekly {snapshot.seven_day_pct or 0:.0f}% reached target "
-                f"({self.target_session_pct:.0f}%/{self.target_weekly_pct:.0f}%). "
+                f"session {s_pct:.0f}% (pace {s_pct * _PACE_MARGIN:.0f}% vs "
+                f"time {s_elapsed:.0f}%), "
+                f"weekly {w_pct:.0f}% (pace {w_pct * _PACE_MARGIN:.0f}% vs "
+                f"time {w_elapsed:.0f}%). "
                 f"Sleeping {wait_secs / 60:.1f} min before re-check...[/yellow]"
             )
             await asyncio.sleep(wait_secs)
@@ -182,26 +205,42 @@ class SessionThrottle:
             reason = self.disabled_reason or "no snapshot"
             return f"Throttle disabled ({reason}){model_str}"
 
-        s = snapshot.five_hour_pct
-        w = snapshot.seven_day_pct
-        worst = max(s or 0.0, w or 0.0)
-        if worst < 50:
+        s_pct = snapshot.five_hour_pct
+        w_pct = snapshot.seven_day_pct
+        s_elapsed = self._window_elapsed_pct(
+            snapshot.five_hour_resets_at, _SESSION_WINDOW_SECS
+        )
+        w_elapsed = self._window_elapsed_pct(
+            snapshot.seven_day_resets_at, _WEEKLY_WINDOW_SECS
+        )
+
+        # Indicator based on the worst (smallest, most negative) margin
+        # between elapsed_pct and usage_pct * 1.05 across the two windows.
+        margins = []
+        if s_pct is not None and snapshot.five_hour_resets_at is not None:
+            margins.append(s_elapsed - s_pct * _PACE_MARGIN)
+        if w_pct is not None and snapshot.seven_day_resets_at is not None:
+            margins.append(w_elapsed - w_pct * _PACE_MARGIN)
+        worst_margin = min(margins) if margins else 100.0
+        if worst_margin > 15:
             indicator = "🟢 Plenty"
-        elif worst < 75:
+        elif worst_margin > 5:
             indicator = "🟡 OK"
-        elif worst < 90:
+        elif worst_margin > 0:
             indicator = "🟠 Tight"
         else:
-            indicator = "🔴 High"
+            indicator = "🔴 Over"
 
         s_part = (
-            f"Session {s:.0f}% (resets {_fmt_reset(snapshot.five_hour_resets_at)})"
-            if s is not None
+            f"Session {s_pct:.0f}% / time {s_elapsed:.0f}% "
+            f"(resets {_fmt_reset(snapshot.five_hour_resets_at)})"
+            if s_pct is not None
             else "Session —"
         )
         w_part = (
-            f"Weekly {w:.0f}% (resets {_fmt_reset(snapshot.seven_day_resets_at)})"
-            if w is not None
+            f"Weekly {w_pct:.0f}% / time {w_elapsed:.0f}% "
+            f"(resets {_fmt_reset(snapshot.seven_day_resets_at)})"
+            if w_pct is not None
             else "Weekly —"
         )
         return f"{s_part} | {w_part} | {indicator}{model_str}"
@@ -214,23 +253,80 @@ class SessionThrottle:
         self.disabled_reason = reason
         self.last_snapshot = None
 
-    def _seconds_until_next_reset(self) -> float:
-        """Time to the soonest known reset across the two windows. Falls back
-        to MAX_WAIT_SECS if the snapshot has no reset times (unusual)."""
+    @staticmethod
+    def _window_elapsed_pct(
+        resets_at: datetime | None, duration_secs: int
+    ) -> float:
+        """Elapsed share of a window (0..100) given when it resets."""
+        if resets_at is None:
+            return 0.0
+        now_utc = datetime.now(timezone.utc)
+        secs_to_reset = (resets_at - now_utc).total_seconds()
+        elapsed = duration_secs - max(0.0, secs_to_reset)
+        return max(0.0, min(100.0, elapsed / duration_secs * 100))
+
+    @classmethod
+    def _window_allowed(
+        cls,
+        pct: float | None,
+        resets_at: datetime | None,
+        duration_secs: int,
+        target_pct: float,
+    ) -> bool:
+        """A single window passes if it's below its hard target AND its
+        usage_pct * _PACE_MARGIN does not outpace its elapsed time share."""
+        if pct is None:
+            return True
+        if pct >= target_pct:
+            return False
+        if resets_at is None:
+            return True  # cannot compute pacing without a reset time
+        elapsed_pct = cls._window_elapsed_pct(resets_at, duration_secs)
+        return pct * _PACE_MARGIN <= elapsed_pct
+
+    def _seconds_until_allowed(self) -> float:
+        """Time until the throttle re-opens.
+
+        For each window that currently blocks us, compute when it stops
+        blocking (either hard target retires at reset, or pace catches up at
+        `usage_pct * _PACE_MARGIN`% elapsed) and take the maximum — we need
+        every blocked window to clear before we can proceed.
+        """
         snapshot = self.last_snapshot
         if snapshot is None:
-            return _MAX_WAIT_SECS
-        now_utc = datetime.now(timezone.utc)
-        candidates: list[float] = []
-        for resets_at in (
-            snapshot.five_hour_resets_at,
-            snapshot.seven_day_resets_at,
+            return _MIN_WAIT_SECS
+        waits: list[float] = [0.0]
+        for pct, resets_at, duration, target in (
+            (
+                snapshot.five_hour_pct,
+                snapshot.five_hour_resets_at,
+                _SESSION_WINDOW_SECS,
+                self.target_session_pct,
+            ),
+            (
+                snapshot.seven_day_pct,
+                snapshot.seven_day_resets_at,
+                _WEEKLY_WINDOW_SECS,
+                self.target_weekly_pct,
+            ),
         ):
-            if resets_at is None:
+            if pct is None or resets_at is None:
                 continue
-            secs = (resets_at - now_utc).total_seconds()
-            if secs > 0:
-                candidates.append(secs)
-        if not candidates:
-            return _MAX_WAIT_SECS
-        return min(candidates)
+            secs_to_reset = max(
+                0.0, (resets_at - datetime.now(timezone.utc)).total_seconds()
+            )
+            if pct >= target:
+                # Hard cap — only reset clears it.
+                waits.append(secs_to_reset)
+                continue
+            elapsed_pct = self._window_elapsed_pct(resets_at, duration)
+            paced_pct = pct * _PACE_MARGIN
+            if paced_pct <= elapsed_pct:
+                continue  # not blocking
+            # Need elapsed_pct to reach paced_pct.
+            needed_elapsed_secs = (paced_pct / 100.0) * duration
+            current_elapsed_secs = duration - secs_to_reset
+            waits.append(
+                min(needed_elapsed_secs - current_elapsed_secs, secs_to_reset)
+            )
+        return max(waits)
