@@ -125,6 +125,7 @@ async def run_discovery_loop(
     model: str | None = None,
     max_turns: int = 80,
     backend: str = "claude",
+    effort: str | None = None,
 ) -> None:
     """Main discovery loop.
 
@@ -233,6 +234,7 @@ async def run_discovery_loop(
                         on_activity=on_activity,
                         model=model,
                         max_turns=max_turns,
+                        effort=effort,
                     )
             except asyncio.TimeoutError:
                 display.console.print(
@@ -400,6 +402,7 @@ async def run_discovery_loop(
                                     on_activity=on_revise_activity,
                                     model=model,
                                     max_turns=max_turns,
+                                    effort=effort,
                                 )
                         except Exception as e:
                             err_msg = str(e)

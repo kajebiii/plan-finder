@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Iterative AI-powered codebase improvement plan discovery tool"
 requires-python = ">=3.10"
 dependencies = [
-    "claude-agent-sdk>=0.1.30",
+    "claude-agent-sdk>=0.2.82",
     "typer>=0.15.0",
     "rich>=13.0.0",
     "pydantic>=2.0.0",
