@@ -96,18 +96,18 @@ async def _wait_for_next_session(throttle: SessionThrottle | None) -> None:
     import asyncio
     from datetime import datetime
 
-    if throttle:
-        now = datetime.now()
-        remaining = (throttle.session_end - now).total_seconds()
+    session_end = throttle.session_end if throttle else None
+    if session_end is not None:
+        remaining = (session_end - datetime.now()).total_seconds()
         if remaining > 0:
             display.console.print(
-                f"[dim]Session ends at {throttle.session_end.strftime('%H:%M')}. "
+                f"[dim]Session ends at {session_end.strftime('%H:%M')}. "
                 f"Waiting {remaining / 60:.0f} min...[/dim]"
             )
             await asyncio.sleep(remaining + 60)  # +1min buffer
             return
 
-    # No throttle or session already ended: wait 5 min and retry
+    # No throttle, snapshot unavailable, or session already ended: wait 5 min.
     display.console.print("[dim]Waiting 5 min before retrying...[/dim]")
     await asyncio.sleep(300)
 

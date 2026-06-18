@@ -1,12 +1,10 @@
 """Throttle plan-finder iterations based on Claude OAuth utilization.
 
-We ask Anthropic directly (via `oauth_usage.ClaudeOAuthUsage`) for the
-server-side utilization percentages of the current 5-hour session and 7-day
-weekly windows. When either crosses the configured target percentage, we
-sleep until the soonest reset.
-
-This replaces the older ccusage-driven cost throttle. There is no
-user-configured budget anymore — the server is the authoritative source.
+`oauth_usage.ClaudeOAuthUsage` asks Anthropic for the server-reported
+utilization percentages of the active 5-hour session and 7-day weekly
+windows. When either reaches the configured target we sleep until the
+soonest reset and re-check. No user-configured budget — the server is
+the source of truth.
 """
 
 from __future__ import annotations
@@ -90,12 +88,8 @@ class SessionThrottle:
         return None
 
     def reinit(self) -> None:
-        """Alias retained for engine.py's existing reset path."""
+        """Force-refresh after a session reset or transient error."""
         self.refresh(force=True)
-
-    def try_attach(self) -> bool:
-        """Alias retained for engine.py."""
-        return self.refresh()
 
     def add_usage(
         self, cost_usd: float, tokens: int, model: str | None = None

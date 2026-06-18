@@ -273,7 +273,9 @@ def main(
             "[dim]Codex backend: cost throttle disabled "
             "(relies on usage-limit reset times).[/dim]"
         )
-    # `session_budget` is intentionally unused; see its --help.
+    # session_budget is intentionally ignored (see its --help). Dropping the
+    # local name keeps a later reader from wondering why we read but never use
+    # it; the flag stays declared so persisted daemon args keep parsing.
     del session_budget
 
     from .engine import run_discovery_loop
