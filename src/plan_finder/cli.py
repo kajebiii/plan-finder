@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 import typer
 from typing_extensions import Annotated
+
+
+class EffortLevel(str, Enum):
+    """Reasoning effort levels accepted by Claude CLI's --effort flag."""
+
+    low = "low"
+    medium = "medium"
+    high = "high"
+    xhigh = "xhigh"
+    max = "max"
 
 app = typer.Typer(
     name="plan-finder",
@@ -124,13 +135,15 @@ def main(
         ),
     ] = 80,
     effort: Annotated[
-        Optional[str],
+        Optional[EffortLevel],
         typer.Option(
             "--effort",
             help="Reasoning effort for the Claude session: low / medium / high "
-            "/ xhigh. Passed through to `claude --effort <level>`. Default: "
+            "/ xhigh / max. Passed through to `claude --effort <level>`. "
+            "Invalid values are rejected by typer at parse time. Default: "
             "the Claude CLI's own default. Ignored for Codex backend "
             "(Codex sets reasoning effort via its own config).",
+            case_sensitive=False,
         ),
     ] = None,
     clear_rejections: Annotated[
@@ -301,6 +314,14 @@ def main(
             console.print(f"[red]Invalid --stop-at format: {stop_at}. Use HH:MM.[/red]")
             raise typer.Exit(1)
 
+    # Echo the resolved effort so the user has visual confirmation that the
+    # flag actually reached plan-finder (and was understood). When omitted we
+    # stay silent — Claude CLI's own default is used.
+    if effort is not None and backend == "claude":
+        console.print(f"[dim]Reasoning effort: [bold]{effort.value}[/bold][/dim]")
+
+    effort_value: str | None = effort.value if effort is not None else None
+
     asyncio.run(
         run_discovery_loop(
             plan_prompt=prompt,
@@ -315,7 +336,7 @@ def main(
             model=model,
             max_turns=max_turns,
             backend=backend,
-            effort=effort,
+            effort=effort_value,
         )
     )
 

@@ -198,7 +198,7 @@ chmod +x ~/.plan-finder-daemon.pre-hook
 | `--session-budget` | | **[Deprecated]** 효과 없음. 데몬 args 호환용 잔존 | 40.0 |
 | `--model` | | 모델 지정 (Claude: `claude-opus-4-6`, Codex: `gpt-5.5` 등) | 백엔드 기본값 |
 | `--max-turns` | | Claude 쿼리당 최대 턴 수 | 80 |
-| `--effort` | | Claude 세션의 reasoning effort: `low` / `medium` / `high` / `xhigh`. `claude --effort <level>` 로 패스스루. Codex 백엔드면 무시 | (Claude CLI 기본값) |
+| `--effort` | | Claude 세션의 reasoning effort: `low` / `medium` / `high` / `xhigh` / `max`. 다른 값은 typer 가 즉시 거부. 적용되면 시작 시 `Reasoning effort: <level>` 로 한 줄 출력. `claude --effort <level>` 로 패스스루. Codex 백엔드면 무시 | (Claude CLI 기본값) |
 | `--stop-at` | | 지정 시각에 종료 (HH:MM) | 없음 |
 | `--no-resume` | | 반복 간 Claude 세션 초기화 | 꺼짐 (세션 유지) |
 | `--clear-rejections` | | 거절 기록 초기화 후 시작 | |

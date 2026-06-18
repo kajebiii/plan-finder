@@ -63,9 +63,12 @@ async def discover_plan(
         options.model = model
 
     if effort:
-        # Claude CLI accepts `--effort <level>` (low/medium/high/xhigh).
-        # claude-agent-sdk passes extra_args through verbatim.
-        options.extra_args = {**(options.extra_args or {}), "effort": effort}
+        # Claude CLI accepts `--effort <level>` (low/medium/high/xhigh/max).
+        # claude-agent-sdk passes extra_args through verbatim, so we need a
+        # plain string here. Unwrap Enum members defensively in case a caller
+        # passes one in directly (e.g. EffortLevel.max from cli.py).
+        effort_str = getattr(effort, "value", None) or str(effort)
+        options.extra_args = {**(options.extra_args or {}), "effort": effort_str}
 
     if resume_session_id:
         options.resume = resume_session_id
