@@ -232,7 +232,7 @@ async def run_discovery_loop(
                     )
             except asyncio.TimeoutError:
                 display.console.print(
-                    "\n[yellow]Query timed out (30 min). Resetting session and retrying...[/yellow]"
+                    "\n[yellow]Query timed out (45 min). Resetting session and retrying...[/yellow]"
                 )
                 session_id = None
                 session_start_time = _dt.now()
