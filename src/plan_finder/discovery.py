@@ -25,7 +25,7 @@ class DiscoveryResult:
     num_turns: int = 0
 
 
-QUERY_TIMEOUT_SECONDS = 30 * 60  # 30 minutes per query
+QUERY_TIMEOUT_SECONDS = 45 * 60  # 45 minutes per query
 
 
 async def discover_plan(

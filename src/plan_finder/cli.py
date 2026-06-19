@@ -69,9 +69,28 @@ def main(
         float,
         typer.Option(
             "--session-budget",
-            help="Session budget in USD. Default $40.",
+            help="[Deprecated] No effect since throttle is now driven by "
+            "Anthropic's reported utilization %. Accepted for backward "
+            "compatibility with persisted daemon args.",
         ),
     ] = 40.0,
+    throttle_target_pct: Annotated[
+        float,
+        typer.Option(
+            "--throttle-target-pct",
+            help="Throttle target utilization (%) for both session and weekly "
+            "windows. plan-finder waits for a reset when either window "
+            "reaches this value. Default 95.",
+        ),
+    ] = 95.0,
+    throttle_weekly_pct: Annotated[
+        Optional[float],
+        typer.Option(
+            "--throttle-weekly-pct",
+            help="Override the weekly target % independently (default: same "
+            "as --throttle-target-pct).",
+        ),
+    ] = None,
     no_resume: Annotated[
         bool,
         typer.Option(
@@ -91,6 +110,16 @@ def main(
         typer.Option(
             "--no-throttle",
             help="Disable cost-based throttling (enabled by default).",
+        ),
+    ] = False,
+    no_weekly_throttle: Annotated[
+        bool,
+        typer.Option(
+            "--no-weekly-throttle",
+            help="Disable the 7-day window from the throttle while keeping "
+            "the 5-hour session window active. Useful when grinding through "
+            "a project early in the week without weekly pacing blocking "
+            "you. Implies nothing if --no-throttle is also set.",
         ),
     ] = False,
     model: Annotated[
@@ -253,21 +282,35 @@ def main(
             f"Plans will be saved to [bold]{effective_report_dir / 'pending'}[/bold]"
         )
 
-    # Cost-based throttling is driven by ccusage, which tracks Claude usage only.
-    # Codex is subscription-based, so its throttle is disabled; the engine instead
-    # waits for the reset time reported in Codex's usage-limit errors.
+    # Pct-based throttling driven by Anthropic's /api/oauth/usage utilization
+    # (session + weekly windows). Codex is subscription-based so its throttle
+    # is disabled; the engine instead waits for the reset time reported in
+    # Codex's usage-limit errors.
     session_throttle = None
     throttle_enabled = False
     if backend == "claude":
         from .throttle import SessionThrottle
 
-        session_throttle = SessionThrottle(session_budget=session_budget)
+        weekly_pct = (
+            throttle_weekly_pct
+            if throttle_weekly_pct is not None
+            else throttle_target_pct
+        )
+        session_throttle = SessionThrottle(
+            target_session_pct=throttle_target_pct,
+            target_weekly_pct=weekly_pct,
+            disable_weekly=no_weekly_throttle,
+        )
         throttle_enabled = not no_throttle
     elif no_throttle is False:
         console.print(
             "[dim]Codex backend: cost throttle disabled "
             "(relies on usage-limit reset times).[/dim]"
         )
+    # session_budget is intentionally ignored (see its --help). Dropping the
+    # local name keeps a later reader from wondering why we read but never use
+    # it; the flag stays declared so persisted daemon args keep parsing.
+    del session_budget
 
     from .engine import run_discovery_loop
 

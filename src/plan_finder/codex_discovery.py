@@ -35,7 +35,7 @@ class DiscoveryResult:
     num_turns: int = 0
 
 
-QUERY_TIMEOUT_SECONDS = 30 * 60  # 30 minutes per query
+QUERY_TIMEOUT_SECONDS = 45 * 60  # 45 minutes per query
 
 _PLAN_PROMPT_SUFFIX = (
     "\n\nReturn ONLY the structured plan as your final message, matching the "

@@ -1,219 +1,350 @@
-"""Session-aware throttle using cost ($) from ResultMessage.total_cost_usd.
+"""Throttle plan-finder iterations based on Claude OAuth utilization.
 
-Formula:
-  (cumulative_cost / session_budget) * 1.05 < (elapsed / session_duration)
-
-Session timing auto-detected via `ccusage blocks --json`.
+`oauth_usage.ClaudeOAuthUsage` asks Anthropic for the server-reported
+utilization percentages of the active 5-hour session and 7-day weekly
+windows. When either reaches the configured target we sleep until the
+soonest reset and re-check. No user-configured budget — the server is
+the source of truth.
 """
 
 from __future__ import annotations
 
-import json
-import subprocess
-from datetime import datetime
+import asyncio
+from datetime import datetime, timezone
 
 from . import display
+from .oauth_usage import (
+    ClaudeOAuthUsage,
+    OAuthCredentialsMissing,
+    OAuthEndpointError,
+    OAuthRateLimited,
+    OAuthUnauthorized,
+    UsageSnapshot,
+)
 
-DEFAULT_SESSION_BUDGET = 40.0  # $40 per session
+DEFAULT_TARGET_PCT = 95.0
+
+# Window durations Anthropic uses for the OAuth utilization endpoint.
+_SESSION_WINDOW_SECS = 5 * 60 * 60
+_WEEKLY_WINDOW_SECS = 7 * 24 * 60 * 60
+
+# Time-proportional pacing: keep `usage_pct * 1.05` below `elapsed_pct` so the
+# budget is spent roughly evenly across the window. Matches the original
+# ccusage-era formula.
+_PACE_MARGIN = 1.05
+
+_MIN_WAIT_SECS = 60
+_MAX_WAIT_SECS = 30 * 60
 
 
-class CcusageNotInstalled(RuntimeError):
-    """ccusage CLI is not installed."""
-
-
-class NoActiveSession(RuntimeError):
-    """ccusage found no active session block."""
-
-
-def detect_session() -> dict:
-    """Auto-detect current session info from ccusage.
-
-    Returns dict with keys:
-      session_start: datetime (local)
-      session_end: datetime (local)
-      cost_usd: float (cost already spent in this session)
-      models: list[str] (models used in this session)
-
-    Raises CcusageNotInstalled if ccusage is missing.
-    Raises NoActiveSession if no active block found.
-    """
-    try:
-        json_result = subprocess.run(
-            ["ccusage", "blocks", "--json", "--active"],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-    except FileNotFoundError:
-        raise CcusageNotInstalled(
-            "ccusage is required but not installed. Install it with: brew install ccusage"
-        )
-    except subprocess.TimeoutExpired:
-        raise NoActiveSession("ccusage timed out (30s). Skipping session detection.")
-
-    if json_result.returncode != 0:
-        raise NoActiveSession(
-            f"ccusage exited with code {json_result.returncode}: {json_result.stderr.strip()[:200]}"
-        )
-
-    data = json.loads(json_result.stdout)
-    active_block = None
-
-    for block in data.get("blocks", []):
-        if block.get("isActive"):
-            active_block = block
-
-    if active_block is None:
-        raise NoActiveSession("No active session found via ccusage.")
-
-    start_utc = datetime.fromisoformat(
-        active_block["startTime"].replace("Z", "+00:00")
-    )
-    end_utc = datetime.fromisoformat(
-        active_block["endTime"].replace("Z", "+00:00")
-    )
-    session_start = start_utc.astimezone().replace(tzinfo=None)
-    session_end = end_utc.astimezone().replace(tzinfo=None)
-
-    return {
-        "session_start": session_start,
-        "session_end": session_end,
-        "cost_usd": active_block.get("costUSD", 0.0),
-        "models": active_block.get("models", []),
-    }
+def _fmt_reset(d: datetime | None) -> str:
+    """Compact display of a reset time relative to now."""
+    if d is None:
+        return "—"
+    local = d.astimezone()
+    now_local = datetime.now(local.tzinfo)
+    if abs((local - now_local).total_seconds()) < 24 * 3600:
+        return local.strftime("%H:%M")
+    return local.strftime("%m-%d %H:%M")
 
 
 class SessionThrottle:
+    """Percentage-based throttle.
+
+    Engaged when `five_hour_pct >= target_session_pct` OR
+    `seven_day_pct >= target_weekly_pct`. While engaged, callers of
+    `wait_if_needed()` sleep until the soonest reset and refresh.
+    """
+
     def __init__(
         self,
-        session_budget: float = DEFAULT_SESSION_BUDGET,
+        target_session_pct: float = DEFAULT_TARGET_PCT,
+        target_weekly_pct: float = DEFAULT_TARGET_PCT,
+        disable_weekly: bool = False,
+        oauth_client: ClaudeOAuthUsage | None = None,
     ) -> None:
-        self.session_budget = session_budget
-        self.cumulative_cost: float = 0.0
-        self.cumulative_tokens: int = 0
+        self.target_session_pct = target_session_pct
+        self.target_weekly_pct = target_weekly_pct
+        # When True, the 7-day window is skipped from both allow checks and
+        # the status line so the throttle only paces the 5-hour session.
+        # Useful when a user wants to grind through a project early in the
+        # week without weekly time-proportional pacing blocking them.
+        self.disable_weekly = disable_weekly
+        self._client = oauth_client or ClaudeOAuthUsage()
+        self.last_snapshot: UsageSnapshot | None = None
+        self.disabled_reason: str | None = None
+        # Tracked only for status_line display continuity across iterations.
         self.model: str | None = None
-        self._init_session()
+        # Initial attach attempt — graceful, never raises.
+        self.refresh(force=True)
 
-    def _init_session(self) -> None:
-        """Detect session via ccusage.
+    # ----- Backward-compat shims (engine.py used these names) -----
 
-        Raises CcusageNotInstalled if ccusage is missing.
-        On NoActiveSession, sets session_ready=False (throttle disabled).
-        """
-        try:
-            session_info = detect_session()
-        except NoActiveSession:
-            self.session_ready = False
-            display.console.print(
-                "[dim]No active session yet — throttle disabled until session starts.[/dim]"
+    @property
+    def session_ready(self) -> bool:
+        return self.last_snapshot is not None
+
+    @property
+    def session_pct(self) -> float | None:
+        return self.last_snapshot.five_hour_pct if self.last_snapshot else None
+
+    @property
+    def weekly_pct(self) -> float | None:
+        return self.last_snapshot.seven_day_pct if self.last_snapshot else None
+
+    @property
+    def session_end(self) -> datetime | None:
+        """Local-naive datetime when the 5-hour window resets, for legacy
+        callers comparing against `datetime.now()`."""
+        if self.last_snapshot and self.last_snapshot.five_hour_resets_at:
+            return self.last_snapshot.five_hour_resets_at.astimezone().replace(
+                tzinfo=None
             )
-            return
-
-        self.session_ready = True
-        self.session_start = session_info["session_start"]
-        self.session_end = session_info["session_end"]
-        self.session_duration = self.session_end - self.session_start
-        self.cumulative_cost = session_info["cost_usd"]
-        models = [m for m in session_info.get("models", []) if m != "<synthetic>"]
-        if models and self.model is None:
-            self.model = models[0]
-        display.console.print(
-            f"[dim]Session detected via ccusage: "
-            f"{self.session_start.strftime('%H:%M')} ~ "
-            f"{self.session_end.strftime('%H:%M')}, "
-            f"${self.cumulative_cost:.2f}/${self.session_budget:.0f} spent[/dim]"
-        )
+        return None
 
     def reinit(self) -> None:
-        """Re-detect session info (e.g. after session reset)."""
-        display.console.print("[dim]Re-detecting session...[/dim]")
-        self.cumulative_cost = 0.0
-        self.cumulative_tokens = 0
-        self._init_session()
+        """Force-refresh after a session reset or transient error."""
+        self.refresh(force=True)
 
-    def add_usage(self, cost_usd: float, tokens: int, model: str | None = None) -> None:
-        self.cumulative_cost += cost_usd
-        self.cumulative_tokens += tokens
+    def add_usage(
+        self, cost_usd: float, tokens: int, model: str | None = None
+    ) -> None:
+        """Deprecated. Server-side utilization is now the source of truth, so
+        per-iteration cost accumulation is no longer needed. We keep the
+        signature so existing call sites continue to work; only `model` is
+        retained for the status line."""
         if model and self.model is None:
             self.model = model
 
-    def _elapsed_ratio(self) -> float:
-        now = datetime.now()
-        elapsed = (now - self.session_start).total_seconds()
-        total = self.session_duration.total_seconds()
-        return max(0.0, min(1.0, elapsed / total))
+    # ----- Core API -----
 
-    def _usage_ratio(self) -> float:
-        if self.session_budget <= 0:
-            return 0.0
-        return self.cumulative_cost / self.session_budget
+    def refresh(self, force: bool = False) -> bool:
+        """Fetch the latest UsageSnapshot. Returns True if currently attached
+        (we have a valid snapshot), False if throttle is disabled."""
+        try:
+            snapshot = self._client.get(force=force)
+        except OAuthCredentialsMissing:
+            self._disable("credentials missing — run `claude login`")
+            return False
+        except OAuthUnauthorized:
+            self._disable("token expired — run `claude login`")
+            return False
+        except OAuthRateLimited as e:
+            self._disable(
+                f"OAuth /usage rate-limited; retry in {e.retry_after}s"
+            )
+            return False
+        except OAuthEndpointError as e:
+            self._disable(f"OAuth endpoint error: {e}")
+            return False
+
+        was_attached = self.last_snapshot is not None
+        self.last_snapshot = snapshot
+        self.disabled_reason = None
+        if not was_attached:
+            display.console.print(
+                f"[dim]Throttle armed via OAuth: "
+                f"session {snapshot.five_hour_pct or 0:.0f}% "
+                f"(resets {_fmt_reset(snapshot.five_hour_resets_at)}), "
+                f"weekly {snapshot.seven_day_pct or 0:.0f}% "
+                f"(resets {_fmt_reset(snapshot.seven_day_resets_at)}).[/dim]"
+            )
+        return True
 
     def is_allowed(self) -> bool:
-        if not self.session_ready:
-            return True
-        return self._usage_ratio() * 1.05 < self._elapsed_ratio()
+        """Allowed when neither window has reached its hard target AND each
+        window's utilization is paced under its elapsed share of time.
 
-    def seconds_until_allowed(self) -> float:
-        usage = self._usage_ratio()
-        if usage <= 0:
-            return 0.0
-        total_secs = self.session_duration.total_seconds()
-        elapsed_secs = (datetime.now() - self.session_start).total_seconds()
-        needed_elapsed = usage * 1.05 * total_secs
-        remaining = max(0.0, needed_elapsed - elapsed_secs)
-        # Cap at session end — session resets after that
-        time_until_session_end = max(0.0, total_secs - elapsed_secs)
-        return min(remaining, time_until_session_end)
+        Pacing per window:
+            usage_pct * _PACE_MARGIN <= elapsed_pct
+
+        which is the original ccusage-era formula carried over verbatim.
+        """
+        snapshot = self.last_snapshot
+        if snapshot is None:
+            return True
+        if not self._window_allowed(
+            snapshot.five_hour_pct,
+            snapshot.five_hour_resets_at,
+            _SESSION_WINDOW_SECS,
+            self.target_session_pct,
+        ):
+            return False
+        if self.disable_weekly:
+            return True
+        return self._window_allowed(
+            snapshot.seven_day_pct,
+            snapshot.seven_day_resets_at,
+            _WEEKLY_WINDOW_SECS,
+            self.target_weekly_pct,
+        )
 
     async def wait_if_needed(self) -> None:
-        import asyncio
-
+        """Sleep until the throttle re-opens, then refresh."""
         while not self.is_allowed():
-            wait = self.seconds_until_allowed()
-            if wait <= 0:
-                break
-            wait += 30  # buffer to avoid re-triggering
-            from datetime import datetime
-
+            wait_secs = self._seconds_until_allowed()
+            wait_secs = max(_MIN_WAIT_SECS, min(_MAX_WAIT_SECS, wait_secs))
+            snapshot = self.last_snapshot
             now_str = datetime.now().strftime("%H:%M:%S")
-            display.console.print(
-                f"\n[yellow][{now_str}] Throttling: cost {self._usage_ratio():.0%} * 1.05 "
-                f"> time {self._elapsed_ratio():.0%}. "
-                f"Waiting {wait / 60:.1f} min...[/yellow]"
+            s_pct = snapshot.five_hour_pct or 0
+            w_pct = snapshot.seven_day_pct or 0
+            s_elapsed = self._window_elapsed_pct(
+                snapshot.five_hour_resets_at, _SESSION_WINDOW_SECS
             )
-            await asyncio.sleep(wait)
-            display.console.print("[dim]Throttle wait done, resuming...[/dim]")
+            w_elapsed = self._window_elapsed_pct(
+                snapshot.seven_day_resets_at, _WEEKLY_WINDOW_SECS
+            )
+            display.console.print(
+                f"\n[yellow][{now_str}] Throttling: "
+                f"session {s_pct:.0f}% (pace {s_pct * _PACE_MARGIN:.0f}% vs "
+                f"time {s_elapsed:.0f}%), "
+                f"weekly {w_pct:.0f}% (pace {w_pct * _PACE_MARGIN:.0f}% vs "
+                f"time {w_elapsed:.0f}%). "
+                f"Sleeping {wait_secs / 60:.1f} min before re-check...[/yellow]"
+            )
+            await asyncio.sleep(wait_secs)
+            display.console.print(
+                "[dim]Throttle wait done, refreshing utilization...[/dim]"
+            )
+            self.refresh(force=True)
 
     def status_line(self) -> str:
-        if not self.session_ready:
-            model_str = f" | Model: {self.model}" if self.model else ""
-            return f"No active session — throttle disabled{model_str}"
+        snapshot = self.last_snapshot
+        model_str = f" | Model: {self.model}" if self.model else ""
+        if snapshot is None:
+            reason = self.disabled_reason or "no snapshot"
+            return f"Throttle disabled ({reason}){model_str}"
 
-        usage = self._usage_ratio()
-        elapsed = self._elapsed_ratio()
-        pace = usage * 1.05
-        margin = elapsed - pace
+        s_pct = snapshot.five_hour_pct
+        w_pct = snapshot.seven_day_pct
+        s_elapsed = self._window_elapsed_pct(
+            snapshot.five_hour_resets_at, _SESSION_WINDOW_SECS
+        )
+        w_elapsed = self._window_elapsed_pct(
+            snapshot.seven_day_resets_at, _WEEKLY_WINDOW_SECS
+        )
 
-        if margin > 0.15:
+        # Indicator based on the worst (smallest, most negative) margin
+        # between elapsed_pct and usage_pct * 1.05 across the windows we
+        # actually enforce. Skip weekly when it's been disabled.
+        margins = []
+        if s_pct is not None and snapshot.five_hour_resets_at is not None:
+            margins.append(s_elapsed - s_pct * _PACE_MARGIN)
+        if (
+            not self.disable_weekly
+            and w_pct is not None
+            and snapshot.seven_day_resets_at is not None
+        ):
+            margins.append(w_elapsed - w_pct * _PACE_MARGIN)
+        worst_margin = min(margins) if margins else 100.0
+        if worst_margin > 15:
             indicator = "🟢 Plenty"
-        elif margin > 0.05:
+        elif worst_margin > 5:
             indicator = "🟡 OK"
-        elif margin > 0:
+        elif worst_margin > 0:
             indicator = "🟠 Tight"
         else:
             indicator = "🔴 Over"
 
-        remaining_hours = (
-            self.session_duration.total_seconds() * (1 - elapsed) / 3600
+        s_part = (
+            f"Session {s_pct:.0f}% / time {s_elapsed:.0f}% "
+            f"(resets {_fmt_reset(snapshot.five_hour_resets_at)})"
+            if s_pct is not None
+            else "Session —"
         )
+        if self.disable_weekly:
+            w_part = "Weekly: disabled"
+        elif w_pct is not None:
+            w_part = (
+                f"Weekly {w_pct:.0f}% / time {w_elapsed:.0f}% "
+                f"(resets {_fmt_reset(snapshot.seven_day_resets_at)})"
+            )
+        else:
+            w_part = "Weekly —"
+        return f"{s_part} | {w_part} | {indicator}{model_str}"
 
-        model_str = f" | Model: {self.model}" if self.model else ""
+    # ----- Internals -----
 
-        return (
-            f"Cost: ${self.cumulative_cost:.2f}/"
-            f"${self.session_budget:.0f} "
-            f"({usage:.0%}) | "
-            f"Session: {elapsed:.0%} ({remaining_hours:.1f}h left) | "
-            f"{indicator} (pace {pace:.0%} vs time {elapsed:.0%})"
-            f"{model_str}"
-        )
+    def _disable(self, reason: str) -> None:
+        if self.disabled_reason != reason:
+            display.console.print(f"[dim]Throttle disabled: {reason}[/dim]")
+        self.disabled_reason = reason
+        self.last_snapshot = None
+
+    @staticmethod
+    def _window_elapsed_pct(
+        resets_at: datetime | None, duration_secs: int
+    ) -> float:
+        """Elapsed share of a window (0..100) given when it resets."""
+        if resets_at is None:
+            return 0.0
+        now_utc = datetime.now(timezone.utc)
+        secs_to_reset = (resets_at - now_utc).total_seconds()
+        elapsed = duration_secs - max(0.0, secs_to_reset)
+        return max(0.0, min(100.0, elapsed / duration_secs * 100))
+
+    @classmethod
+    def _window_allowed(
+        cls,
+        pct: float | None,
+        resets_at: datetime | None,
+        duration_secs: int,
+        target_pct: float,
+    ) -> bool:
+        """A single window passes if it's below its hard target AND its
+        usage_pct * _PACE_MARGIN does not outpace its elapsed time share."""
+        if pct is None:
+            return True
+        if pct >= target_pct:
+            return False
+        if resets_at is None:
+            return True  # cannot compute pacing without a reset time
+        elapsed_pct = cls._window_elapsed_pct(resets_at, duration_secs)
+        return pct * _PACE_MARGIN <= elapsed_pct
+
+    def _seconds_until_allowed(self) -> float:
+        """Time until the throttle re-opens.
+
+        For each window that currently blocks us, compute when it stops
+        blocking (either hard target retires at reset, or pace catches up at
+        `usage_pct * _PACE_MARGIN`% elapsed) and take the maximum — we need
+        every blocked window to clear before we can proceed.
+        """
+        snapshot = self.last_snapshot
+        if snapshot is None:
+            return _MIN_WAIT_SECS
+        waits: list[float] = [0.0]
+        for pct, resets_at, duration, target in (
+            (
+                snapshot.five_hour_pct,
+                snapshot.five_hour_resets_at,
+                _SESSION_WINDOW_SECS,
+                self.target_session_pct,
+            ),
+            (
+                snapshot.seven_day_pct,
+                snapshot.seven_day_resets_at,
+                _WEEKLY_WINDOW_SECS,
+                self.target_weekly_pct,
+            ),
+        ):
+            if pct is None or resets_at is None:
+                continue
+            secs_to_reset = max(
+                0.0, (resets_at - datetime.now(timezone.utc)).total_seconds()
+            )
+            if pct >= target:
+                # Hard cap — only reset clears it.
+                waits.append(secs_to_reset)
+                continue
+            elapsed_pct = self._window_elapsed_pct(resets_at, duration)
+            paced_pct = pct * _PACE_MARGIN
+            if paced_pct <= elapsed_pct:
+                continue  # not blocking
+            # Need elapsed_pct to reach paced_pct.
+            needed_elapsed_secs = (paced_pct / 100.0) * duration
+            current_elapsed_secs = duration - secs_to_reset
+            waits.append(
+                min(needed_elapsed_secs - current_elapsed_secs, secs_to_reset)
+            )
+        return max(waits)

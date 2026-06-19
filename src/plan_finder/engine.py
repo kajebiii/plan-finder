@@ -96,18 +96,18 @@ async def _wait_for_next_session(throttle: SessionThrottle | None) -> None:
     import asyncio
     from datetime import datetime
 
-    if throttle:
-        now = datetime.now()
-        remaining = (throttle.session_end - now).total_seconds()
+    session_end = throttle.session_end if throttle else None
+    if session_end is not None:
+        remaining = (session_end - datetime.now()).total_seconds()
         if remaining > 0:
             display.console.print(
-                f"[dim]Session ends at {throttle.session_end.strftime('%H:%M')}. "
+                f"[dim]Session ends at {session_end.strftime('%H:%M')}. "
                 f"Waiting {remaining / 60:.0f} min...[/dim]"
             )
             await asyncio.sleep(remaining + 60)  # +1min buffer
             return
 
-    # No throttle or session already ended: wait 5 min and retry
+    # No throttle, snapshot unavailable, or session already ended: wait 5 min.
     display.console.print("[dim]Waiting 5 min before retrying...[/dim]")
     await asyncio.sleep(300)
 
@@ -187,17 +187,11 @@ async def run_discovery_loop(
             # Quiet hours: no queries 22:00~03:00
             await _wait_if_quiet_hours()
 
-            # Auto-reinit throttle if session expired (crossed 5h boundary)
-            if throttle and throttle.session_ready:
-                from datetime import datetime
-                if datetime.now() > throttle.session_end:
-                    display.console.print(
-                        "[dim]Session expired, re-detecting...[/dim]"
-                    )
-                    throttle.reinit()
-
-            # Throttle: wait if consuming budget faster than time
+            # Refresh the OAuth utilization snapshot (cheap, in-memory cached;
+            # only hits Anthropic when the cache TTL has elapsed). Then sleep
+            # if either session or weekly utilization has reached target.
             if throttle_enabled and throttle:
+                throttle.refresh()
                 await throttle.wait_if_needed()
 
             display.show_discovery_start(iteration)
@@ -238,7 +232,7 @@ async def run_discovery_loop(
                     )
             except asyncio.TimeoutError:
                 display.console.print(
-                    "\n[yellow]Query timed out (30 min). Resetting session and retrying...[/yellow]"
+                    "\n[yellow]Query timed out (45 min). Resetting session and retrying...[/yellow]"
                 )
                 session_id = None
                 session_start_time = _dt.now()
