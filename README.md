@@ -129,6 +129,7 @@ Anthropic이 직접 알려주는 **세션(5h) / 주간(7d) 사용량 %**을 기�
 
 - **트리거 조건**: `session_pct ≥ target` 또는 `weekly_pct ≥ target` 일 때 가장 가까운 reset 시각까지 sleep
 - **기본 target**: 95% (`--throttle-target-pct`로 조절). weekly만 따로 두려면 `--throttle-weekly-pct` 추가
+- **weekly 만 끄기**: `--no-weekly-throttle` 로 7일 윈도우만 비활성화 (5시간 페이싱은 유지). 주 초반에 집중 작업할 때 weekly 시간비례 페이싱이 막는 걸 피하려는 용도. status_line 에 `Weekly: disabled` 로 표시됨
 - **자격증명**: macOS는 Keychain의 `Claude Code-credentials`, 그 외엔 `~/.claude/.credentials.json` (Claude Code 로그인 시 자동 작성)
 - **호출 비용**: 1 HTTP 호출 / 60s 캐시 — 무시할 수 있는 오버헤드
 - 매 iteration마다 상태 표시:
@@ -192,7 +193,8 @@ chmod +x ~/.plan-finder-daemon.pre-hook
 | `--max` | `-m` | 최대 반복 횟수 | 무제한 |
 | `--report-dir` | `-d` | 리포트 저장 경로 | `~/claude-reports/{프로젝트명}` |
 | `--auto` | | 자동 모드 | 꺼짐 |
-| `--no-throttle` | | 쓰로틀링 비활성화 | 꺼짐 (기본 활성) |
+| `--no-throttle` | | 쓰로틀링 전체 비활성화 (session + weekly 둘 다) | 꺼짐 (기본 활성) |
+| `--no-weekly-throttle` | | weekly(7d) 윈도우만 비활성화, session(5h) 페이싱은 유지 | 꺼짐 |
 | `--throttle-target-pct` | | session/weekly 공통 target % | 95.0 |
 | `--throttle-weekly-pct` | | weekly 별도 target (생략 시 위와 동일) | 없음 |
 | `--session-budget` | | **[Deprecated]** 효과 없음. 데몬 args 호환용 잔존 | 40.0 |

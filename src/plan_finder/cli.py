@@ -112,6 +112,16 @@ def main(
             help="Disable cost-based throttling (enabled by default).",
         ),
     ] = False,
+    no_weekly_throttle: Annotated[
+        bool,
+        typer.Option(
+            "--no-weekly-throttle",
+            help="Disable the 7-day window from the throttle while keeping "
+            "the 5-hour session window active. Useful when grinding through "
+            "a project early in the week without weekly pacing blocking "
+            "you. Implies nothing if --no-throttle is also set.",
+        ),
+    ] = False,
     model: Annotated[
         Optional[str],
         typer.Option(
@@ -289,6 +299,7 @@ def main(
         session_throttle = SessionThrottle(
             target_session_pct=throttle_target_pct,
             target_weekly_pct=weekly_pct,
+            disable_weekly=no_weekly_throttle,
         )
         throttle_enabled = not no_throttle
     elif no_throttle is False:

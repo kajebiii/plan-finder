@@ -60,10 +60,16 @@ class SessionThrottle:
         self,
         target_session_pct: float = DEFAULT_TARGET_PCT,
         target_weekly_pct: float = DEFAULT_TARGET_PCT,
+        disable_weekly: bool = False,
         oauth_client: ClaudeOAuthUsage | None = None,
     ) -> None:
         self.target_session_pct = target_session_pct
         self.target_weekly_pct = target_weekly_pct
+        # When True, the 7-day window is skipped from both allow checks and
+        # the status line so the throttle only paces the 5-hour session.
+        # Useful when a user wants to grind through a project early in the
+        # week without weekly time-proportional pacing blocking them.
+        self.disable_weekly = disable_weekly
         self._client = oauth_client or ClaudeOAuthUsage()
         self.last_snapshot: UsageSnapshot | None = None
         self.disabled_reason: str | None = None
@@ -157,12 +163,16 @@ class SessionThrottle:
         snapshot = self.last_snapshot
         if snapshot is None:
             return True
-        return self._window_allowed(
+        if not self._window_allowed(
             snapshot.five_hour_pct,
             snapshot.five_hour_resets_at,
             _SESSION_WINDOW_SECS,
             self.target_session_pct,
-        ) and self._window_allowed(
+        ):
+            return False
+        if self.disable_weekly:
+            return True
+        return self._window_allowed(
             snapshot.seven_day_pct,
             snapshot.seven_day_resets_at,
             _WEEKLY_WINDOW_SECS,
@@ -215,11 +225,16 @@ class SessionThrottle:
         )
 
         # Indicator based on the worst (smallest, most negative) margin
-        # between elapsed_pct and usage_pct * 1.05 across the two windows.
+        # between elapsed_pct and usage_pct * 1.05 across the windows we
+        # actually enforce. Skip weekly when it's been disabled.
         margins = []
         if s_pct is not None and snapshot.five_hour_resets_at is not None:
             margins.append(s_elapsed - s_pct * _PACE_MARGIN)
-        if w_pct is not None and snapshot.seven_day_resets_at is not None:
+        if (
+            not self.disable_weekly
+            and w_pct is not None
+            and snapshot.seven_day_resets_at is not None
+        ):
             margins.append(w_elapsed - w_pct * _PACE_MARGIN)
         worst_margin = min(margins) if margins else 100.0
         if worst_margin > 15:
@@ -237,12 +252,15 @@ class SessionThrottle:
             if s_pct is not None
             else "Session —"
         )
-        w_part = (
-            f"Weekly {w_pct:.0f}% / time {w_elapsed:.0f}% "
-            f"(resets {_fmt_reset(snapshot.seven_day_resets_at)})"
-            if w_pct is not None
-            else "Weekly —"
-        )
+        if self.disable_weekly:
+            w_part = "Weekly: disabled"
+        elif w_pct is not None:
+            w_part = (
+                f"Weekly {w_pct:.0f}% / time {w_elapsed:.0f}% "
+                f"(resets {_fmt_reset(snapshot.seven_day_resets_at)})"
+            )
+        else:
+            w_part = "Weekly —"
         return f"{s_part} | {w_part} | {indicator}{model_str}"
 
     # ----- Internals -----
