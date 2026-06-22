@@ -18,9 +18,19 @@ IMPORTANT RULES:
 """
 
 _REJECTION_CONTEXT_TEMPLATE = """
-PREVIOUSLY REJECTED PLANS (do NOT suggest these or similar ideas again):
+PREVIOUSLY PROPOSED PLANS (do NOT suggest these or similar ideas again).
+If a title below looks close to your idea, READ the .md file FIRST to confirm
+overlap. If it overlaps, set found_nothing=true or refine your proposal to a
+genuinely different finding.
 {rejections}
 """
+
+
+MAX_REJECTIONS_IN_PROMPT = 50
+
+# Reasons set internally by the state machine — these carry no user feedback,
+# so surfacing them in the dedup prompt would just add noise.
+_SYSTEM_REASONS = frozenset({"(pending review)", "(approved)", "(rejected)"})
 
 
 def build_prompt(
@@ -29,9 +39,19 @@ def build_prompt(
 ) -> str:
     """Wrap user prompt with system instructions and rejection context."""
     if rejected_plans:
+        recent = rejected_plans[-MAX_REJECTIONS_IN_PROMPT:]
         lines = []
-        for i, r in enumerate(rejected_plans, 1):
-            lines.append(f"  {i}. [{r.category}] {r.title}: {r.description_summary}")
+        if len(rejected_plans) > MAX_REJECTIONS_IN_PROMPT:
+            lines.append(
+                f"  (showing {MAX_REJECTIONS_IN_PROMPT} most recent "
+                f"of {len(rejected_plans)} total)"
+            )
+        for i, r in enumerate(recent, 1):
+            lines.append(f"  {i}. [{r.category}] {r.title}")
+            if r.markdown_path:
+                lines.append(f"      → {r.markdown_path}")
+            if r.reason and r.reason not in _SYSTEM_REASONS:
+                lines.append(f"      user feedback: {r.reason}")
         rejection_text = _REJECTION_CONTEXT_TEMPLATE.format(
             rejections="\n".join(lines)
         )

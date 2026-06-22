@@ -7,6 +7,7 @@
 PID_FILE="$HOME/.plan-finder-daemon.pid"
 LOG_FILE="$HOME/.plan-finder-daemon.log"
 ARGS_FILE="$HOME/.plan-finder-daemon.args"
+PRE_HOOK_FILE="$HOME/.plan-finder-daemon.pre-hook"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
 run_daemon() {
@@ -15,27 +16,24 @@ run_daemon() {
     TARGET_TIME=""
     if [ -f "$HOME/.plan-finder-daemon.target-time" ]; then
         TARGET_TIME=$(cat "$HOME/.plan-finder-daemon.target-time")
-        rm -f "$HOME/.plan-finder-daemon.target-time"
     fi
 
     CWD=""
     if [ -f "$HOME/.plan-finder-daemon.cwd" ]; then
         CWD=$(cat "$HOME/.plan-finder-daemon.cwd")
-        rm -f "$HOME/.plan-finder-daemon.cwd"
     fi
 
-    # Read args from file (one arg per line) — save before rm
+    # Persistent config files (kept across runs so launchd KeepAlive can re-read on restart)
     PF_ARGS=()
     if [ -f "$ARGS_FILE" ]; then
         while IFS= read -r line; do
             PF_ARGS+=("$line")
         done < "$ARGS_FILE"
-        rm -f "$ARGS_FILE"
     fi
 
     log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
-    export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
+    export PATH="$HOME/.local/bin:/etc/profiles/per-user/$USER/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin"
 
     while true; do
         # Wait until target time if set
@@ -72,7 +70,17 @@ run_daemon() {
             fi
         fi
 
-        log "Starting plan-finder..."
+        # Pre-run hook (optional). Lives at $PRE_HOOK_FILE so the daemon stays
+        # project-agnostic — put repo pulls, secret refresh, etc. in that file.
+        # Failures are logged but never abort the run.
+        if [ -f "$PRE_HOOK_FILE" ]; then
+            log "Running pre-hook: $PRE_HOOK_FILE"
+            bash "$PRE_HOOK_FILE" >> "$LOG_FILE" 2>&1 \
+                || log "pre-hook failed (continuing anyway)"
+        fi
+
+        log "Starting plan-finder with args: ${PF_ARGS[*]}"
+        log "CWD: ${CWD:-$HOME}"
 
         cd "${CWD:-$HOME}"
         uv run --project "$SCRIPT_DIR" plan-finder "${PF_ARGS[@]}" >> "$LOG_FILE" 2>&1

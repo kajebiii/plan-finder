@@ -22,6 +22,10 @@ class DiscoveryResult:
     total_tokens: int
     session_id: str | None
     model: str | None = None
+    num_turns: int = 0
+
+
+QUERY_TIMEOUT_SECONDS = 45 * 60  # 45 minutes per query
 
 
 async def discover_plan(
@@ -30,15 +34,19 @@ async def discover_plan(
     resume_session_id: str | None = None,
     on_activity: Callable[[str], None] | None = None,
     model: str | None = None,
+    max_turns: int = 80,
+    effort: str | None = None,
 ) -> DiscoveryResult:
     """Run a single Claude query to discover one improvement plan."""
+    import asyncio
+
     target_dir = cwd or os.getcwd()
 
     options = ClaudeAgentOptions(
         allowed_tools=["Read", "Glob", "Grep", "WebSearch", "Bash"],
         permission_mode="bypassPermissions",
         cwd=target_dir,
-        max_turns=200,
+        max_turns=max_turns,
         output_format={
             "type": "json_schema",
             "schema": DiscoveredPlan.model_json_schema(),
@@ -54,43 +62,58 @@ async def discover_plan(
     if model:
         options.model = model
 
+    if effort:
+        # Claude CLI accepts `--effort <level>` (low/medium/high/xhigh/max).
+        # claude-agent-sdk passes extra_args through verbatim, so we need a
+        # plain string here. Unwrap Enum members defensively in case a caller
+        # passes one in directly (e.g. EffortLevel.max from cli.py).
+        effort_str = getattr(effort, "value", None) or str(effort)
+        options.extra_args = {**(options.extra_args or {}), "effort": effort_str}
+
     if resume_session_id:
         options.resume = resume_session_id
 
-    plan: DiscoveredPlan | None = None
-    cost: float = 0.0
-    tokens: int = 0
-    session_id: str | None = None
-    model: str | None = None
+    async def _run_query() -> DiscoveryResult:
+        plan: DiscoveredPlan | None = None
+        cost: float = 0.0
+        tokens: int = 0
+        session_id: str | None = None
+        _model: str | None = None
+        turns: int = 0
 
-    async for message in query(prompt=prompt, options=options):
-        if isinstance(message, AssistantMessage):
-            if model is None:
-                model = message.model
-            if on_activity:
+        async for message in query(prompt=prompt, options=options):
+            if isinstance(message, AssistantMessage):
+                if _model is None:
+                    _model = message.model
+                has_tool_use = False
                 for block in message.content:
                     if isinstance(block, ToolUseBlock):
-                        tool_input = block.input
-                        detail = _summarize_tool(block.name, tool_input)
-                        on_activity(detail)
-        elif isinstance(message, ResultMessage):
-            cost = message.total_cost_usd or 0.0
-            session_id = message.session_id
-            if message.usage:
-                u = message.usage
-                tokens = (
-                    u.get("input_tokens", 0)
-                    + u.get("output_tokens", 0)
-                    + u.get("cache_read_input_tokens", 0)
-                    + u.get("cache_creation_input_tokens", 0)
-                )
-            if message.subtype == "success" and message.structured_output:
-                plan = DiscoveredPlan.model_validate(message.structured_output)
+                        has_tool_use = True
+                        if on_activity:
+                            detail = _summarize_tool(block.name, block.input)
+                            on_activity(detail)
+                if has_tool_use:
+                    turns += 1
+            elif isinstance(message, ResultMessage):
+                cost = message.total_cost_usd or 0.0
+                session_id = message.session_id
+                if message.usage:
+                    u = message.usage
+                    tokens = (
+                        u.get("input_tokens", 0)
+                        + u.get("output_tokens", 0)
+                        + u.get("cache_read_input_tokens", 0)
+                        + u.get("cache_creation_input_tokens", 0)
+                    )
+                if message.subtype == "success" and message.structured_output:
+                    plan = DiscoveredPlan.model_validate(message.structured_output)
 
-    return DiscoveryResult(
-        plan=plan, cost_usd=cost, total_tokens=tokens, session_id=session_id,
-        model=model,
-    )
+        return DiscoveryResult(
+            plan=plan, cost_usd=cost, total_tokens=tokens, session_id=session_id,
+            model=_model, num_turns=turns,
+        )
+
+    return await asyncio.wait_for(_run_query(), timeout=QUERY_TIMEOUT_SECONDS)
 
 
 def _summarize_tool(name: str, inp: dict) -> str:

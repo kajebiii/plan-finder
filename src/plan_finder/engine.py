@@ -1,15 +1,25 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from rich.markup import escape as rich_escape
 
 from . import display
-from .discovery import discover_plan
+from .errors import RateLimitError
 from .prompts import build_prompt
 from .reporter import save_plan
 from .state import StateManager
 from .throttle import SessionThrottle
+
+
+def _resolve_backend(backend: str):
+    """Return the discover_plan coroutine for the selected backend."""
+    if backend == "codex":
+        from .codex_discovery import discover_plan
+        return discover_plan
+    from .discovery import discover_plan
+    return discover_plan
 
 
 QUIET_START = 22  # 22:00
@@ -18,6 +28,7 @@ QUIET_END = 3     # 03:00
 # Errors that indicate rate limit / session exhaustion
 _RATE_LIMIT_PATTERNS = [
     "hit your limit",
+    "usage limit",
     "rate limit",
     "rate_limit",
     "overloaded",
@@ -66,23 +77,37 @@ async def _wait_if_quiet_hours() -> None:
         display.console.print("[dim]Quiet hours over, resuming...[/dim]")
 
 
+async def _wait_until(when: object) -> None:
+    """Sleep until the given local datetime (with a small buffer)."""
+    import asyncio
+    from datetime import datetime
+
+    remaining = (when - datetime.now()).total_seconds()  # type: ignore[operator]
+    if remaining > 0:
+        display.console.print(
+            f"[dim]Waiting until {when.strftime('%H:%M')} "  # type: ignore[attr-defined]
+            f"({remaining / 60:.0f} min)...[/dim]"
+        )
+        await asyncio.sleep(remaining + 60)
+
+
 async def _wait_for_next_session(throttle: SessionThrottle | None) -> None:
     """Wait until the current session ends, then return."""
     import asyncio
     from datetime import datetime
 
-    if throttle:
-        now = datetime.now()
-        remaining = (throttle.session_end - now).total_seconds()
+    session_end = throttle.session_end if throttle else None
+    if session_end is not None:
+        remaining = (session_end - datetime.now()).total_seconds()
         if remaining > 0:
             display.console.print(
-                f"[dim]Session ends at {throttle.session_end.strftime('%H:%M')}. "
+                f"[dim]Session ends at {session_end.strftime('%H:%M')}. "
                 f"Waiting {remaining / 60:.0f} min...[/dim]"
             )
             await asyncio.sleep(remaining + 60)  # +1min buffer
             return
 
-    # No throttle or session already ended: wait 5 min and retry
+    # No throttle, snapshot unavailable, or session already ended: wait 5 min.
     display.console.print("[dim]Waiting 5 min before retrying...[/dim]")
     await asyncio.sleep(300)
 
@@ -98,6 +123,9 @@ async def run_discovery_loop(
     resume: bool = True,
     stop_at: object | None = None,  # datetime.time
     model: str | None = None,
+    max_turns: int = 80,
+    backend: str = "claude",
+    effort: str | None = None,
 ) -> None:
     """Main discovery loop.
 
@@ -115,6 +143,8 @@ async def run_discovery_loop(
     """
     import os
 
+    discover_plan = _resolve_backend(backend)
+
     effective_cwd = cwd or os.getcwd()
     project_name = Path(effective_cwd).name
 
@@ -124,11 +154,14 @@ async def run_discovery_loop(
     state_mgr = StateManager(report_dir)
     state_mgr.load()
 
+    from datetime import datetime as _dt
+
     iteration = 0
     session_approved = 0
     session_rejected = 0
     session_pending = 0
     session_id: str | None = None
+    session_start_time = _dt.now()
     consecutive_errors = 0
 
     try:
@@ -154,17 +187,11 @@ async def run_discovery_loop(
             # Quiet hours: no queries 22:00~03:00
             await _wait_if_quiet_hours()
 
-            # Auto-reinit throttle if session expired (crossed 5h boundary)
-            if throttle and throttle.session_ready:
-                from datetime import datetime
-                if datetime.now() > throttle.session_end:
-                    display.console.print(
-                        "[dim]Session expired, re-detecting...[/dim]"
-                    )
-                    throttle.reinit()
-
-            # Throttle: wait if consuming budget faster than time
+            # Refresh the OAuth utilization snapshot (cheap, in-memory cached;
+            # only hits Anthropic when the cache TTL has elapsed). Then sleep
+            # if either session or weekly utilization has reached target.
             if throttle_enabled and throttle:
+                throttle.refresh()
                 await throttle.wait_if_needed()
 
             display.show_discovery_start(iteration)
@@ -175,7 +202,16 @@ async def run_discovery_loop(
                     f"  [dim]Resuming session {session_id[:8]}...[/dim]"
                 )
 
-            prompt = build_prompt(plan_prompt, state_mgr.state.rejected_plans)
+            if session_id and resume:
+                # Claude already knows the full list from the first iteration.
+                # Only include plans discovered during this session.
+                new_plans = [
+                    r for r in state_mgr.state.rejected_plans
+                    if r.rejected_at > session_start_time
+                ]
+                prompt = build_prompt(plan_prompt, new_plans)
+            else:
+                prompt = build_prompt(plan_prompt, state_mgr.state.rejected_plans)
 
             resume_id = session_id if resume else None
 
@@ -191,7 +227,32 @@ async def run_discovery_loop(
                         resume_session_id=resume_id,
                         on_activity=on_activity,
                         model=model,
+                        max_turns=max_turns,
+                        effort=effort,
                     )
+            except asyncio.TimeoutError:
+                display.console.print(
+                    "\n[yellow]Query timed out (45 min). Resetting session and retrying...[/yellow]"
+                )
+                session_id = None
+                session_start_time = _dt.now()
+                iteration -= 1
+                continue
+            except RateLimitError as e:
+                display.console.print(
+                    f"\n[yellow]Usage limit reached: {rich_escape(str(e)[:160])}[/yellow]"
+                )
+                if e.retry_at is not None:
+                    await _wait_until(e.retry_at)
+                else:
+                    await _wait_for_next_session(throttle)
+                session_id = None
+                session_start_time = _dt.now()
+                if throttle:
+                    throttle.reinit()
+                consecutive_errors = 0
+                iteration -= 1
+                continue
             except Exception as e:
                 err_msg = str(e)
                 if _is_rate_limit_error(err_msg):
@@ -200,6 +261,7 @@ async def run_discovery_loop(
                     )
                     await _wait_for_next_session(throttle)
                     session_id = None
+                    session_start_time = _dt.now()
                     if throttle:
                         throttle.reinit()
                     consecutive_errors = 0
@@ -210,6 +272,7 @@ async def run_discovery_loop(
                         f"\n[yellow]Session context too large. Resetting session and retrying...[/yellow]"
                     )
                     session_id = None
+                    session_start_time = _dt.now()
                     iteration -= 1
                     continue
                 # Retriable errors (e.g. exit code 1 from CLI = likely rate limit)
@@ -226,6 +289,7 @@ async def run_discovery_loop(
                         )
                         await _wait_for_next_session(throttle)
                         session_id = None
+                        session_start_time = _dt.now()
                         if throttle:
                             throttle.reinit()
                         consecutive_errors = 0
@@ -235,9 +299,9 @@ async def run_discovery_loop(
                     display.console.print(
                         "[dim]Resetting session and retrying in 30s...[/dim]"
                     )
-                    import asyncio
                     await asyncio.sleep(30)
                     session_id = None
+                    session_start_time = _dt.now()
                     iteration -= 1
                     continue
                 # Unknown error: log and stop gracefully
@@ -255,6 +319,15 @@ async def run_discovery_loop(
             # Capture session_id for next iteration
             if result.session_id:
                 session_id = result.session_id
+
+            cost_str = (
+                f"Cost: ${result.cost_usd:.2f} | " if result.cost_usd else ""
+            )
+            display.console.print(
+                f"  [dim]Turns: {result.num_turns} | "
+                f"{cost_str}"
+                f"Tokens: {result.total_tokens:,}[/dim]"
+            )
 
             # Track usage for throttle
             if throttle:
@@ -277,7 +350,7 @@ async def run_discovery_loop(
                 filepath = save_plan(
                     result.plan, iteration, report_dir, pending=True
                 )
-                state_mgr.add_pending(result.plan)
+                state_mgr.add_pending(result.plan, markdown_path=str(filepath))
                 session_pending += 1
                 display.show_saved_pending(filepath)
             else:
@@ -287,7 +360,9 @@ async def run_discovery_loop(
 
                     if action == "approve":
                         filepath = save_plan(current_plan, iteration, report_dir)
-                        state_mgr.record_approval(current_plan)
+                        state_mgr.record_approval(
+                            current_plan, markdown_path=str(filepath)
+                        )
                         session_approved += 1
                         display.show_saved(filepath)
                         break
@@ -320,6 +395,8 @@ async def run_discovery_loop(
                                     resume_session_id=session_id,
                                     on_activity=on_revise_activity,
                                     model=model,
+                                    max_turns=max_turns,
+                                    effort=effort,
                                 )
                         except Exception as e:
                             err_msg = str(e)
@@ -332,6 +409,7 @@ async def run_discovery_loop(
                                 )
                                 await _wait_for_next_session(throttle)
                                 session_id = None
+                                session_start_time = _dt.now()
                                 if throttle:
                                     throttle.reinit()
                                 break

@@ -1,11 +1,22 @@
 from __future__ import annotations
 
 import asyncio
+from enum import Enum
 from pathlib import Path
 from typing import Optional
 
 import typer
 from typing_extensions import Annotated
+
+
+class EffortLevel(str, Enum):
+    """Reasoning effort levels accepted by Claude CLI's --effort flag."""
+
+    low = "low"
+    medium = "medium"
+    high = "high"
+    xhigh = "xhigh"
+    max = "max"
 
 app = typer.Typer(
     name="plan-finder",
@@ -22,6 +33,13 @@ def main(
             "--prompt",
             "-p",
             help="Plan prompt. If omitted, you'll be asked interactively.",
+        ),
+    ] = None,
+    preset: Annotated[
+        Optional[str],
+        typer.Option(
+            "--preset",
+            help="Preset name to use (e.g. unity). Lists available presets if value is '?'.",
         ),
     ] = None,
     max_iterations: Annotated[
@@ -51,9 +69,28 @@ def main(
         float,
         typer.Option(
             "--session-budget",
-            help="Session budget in USD. Default $40.",
+            help="[Deprecated] No effect since throttle is now driven by "
+            "Anthropic's reported utilization %. Accepted for backward "
+            "compatibility with persisted daemon args.",
         ),
     ] = 40.0,
+    throttle_target_pct: Annotated[
+        float,
+        typer.Option(
+            "--throttle-target-pct",
+            help="Throttle target utilization (%) for both session and weekly "
+            "windows. plan-finder waits for a reset when either window "
+            "reaches this value. Default 95.",
+        ),
+    ] = 95.0,
+    throttle_weekly_pct: Annotated[
+        Optional[float],
+        typer.Option(
+            "--throttle-weekly-pct",
+            help="Override the weekly target % independently (default: same "
+            "as --throttle-target-pct).",
+        ),
+    ] = None,
     no_resume: Annotated[
         bool,
         typer.Option(
@@ -75,11 +112,48 @@ def main(
             help="Disable cost-based throttling (enabled by default).",
         ),
     ] = False,
+    no_weekly_throttle: Annotated[
+        bool,
+        typer.Option(
+            "--no-weekly-throttle",
+            help="Disable the 7-day window from the throttle while keeping "
+            "the 5-hour session window active. Useful when grinding through "
+            "a project early in the week without weekly pacing blocking "
+            "you. Implies nothing if --no-throttle is also set.",
+        ),
+    ] = False,
     model: Annotated[
         Optional[str],
         typer.Option(
             "--model",
-            help="Claude model to use (e.g. claude-opus-4-6, claude-sonnet-4-5-20250929).",
+            help="Model to use. Claude: claude-opus-4-6, claude-sonnet-4-5-20250929. "
+            "Codex: gpt-5.5, o3, etc. Default: backend's own default.",
+        ),
+    ] = None,
+    backend: Annotated[
+        str,
+        typer.Option(
+            "--backend",
+            help="AI backend: 'claude' (claude-agent-sdk) or 'codex' (codex CLI).",
+        ),
+    ] = "claude",
+    max_turns: Annotated[
+        int,
+        typer.Option(
+            "--max-turns",
+            help="Max turns per Claude query. Default 80.",
+        ),
+    ] = 80,
+    effort: Annotated[
+        Optional[EffortLevel],
+        typer.Option(
+            "--effort",
+            help="Reasoning effort for the Claude session: low / medium / high "
+            "/ xhigh / max. Passed through to `claude --effort <level>`. "
+            "Invalid values are rejected by typer at parse time. Default: "
+            "the Claude CLI's own default. Ignored for Codex backend "
+            "(Codex sets reasoning effort via its own config).",
+            case_sensitive=False,
         ),
     ] = None,
     review: Annotated[
@@ -104,11 +178,23 @@ def main(
     files. Rejected plans are remembered and skipped in future runs.
     """
     import os
-
-    from rich.prompt import Prompt
+    import shutil
 
     from .display import console, show_rejected_list
     from .state import StateManager
+
+    backend = backend.lower()
+    if backend not in ("claude", "codex"):
+        console.print(
+            f"[red]Invalid --backend: {backend}. Use 'claude' or 'codex'.[/red]"
+        )
+        raise typer.Exit(1)
+    if backend == "codex" and shutil.which("codex") is None:
+        console.print(
+            "[red]--backend codex requires the codex CLI on PATH. "
+            "Install it and run `codex login` first.[/red]"
+        )
+        raise typer.Exit(1)
 
     cwd = os.getcwd()
     project_name = Path(cwd).name
@@ -129,9 +215,9 @@ def main(
         run_review(effective_report_dir)
         raise typer.Exit(0)
 
-    # Auto mode requires --prompt
-    if auto and not prompt:
-        console.print("[red]--auto requires --prompt. Exiting.[/red]")
+    # Auto mode requires --prompt or --preset
+    if auto and not prompt and not preset:
+        console.print("[red]--auto requires --prompt or --preset. Exiting.[/red]")
         raise typer.Exit(1)
 
     # Show existing rejections if any
@@ -139,16 +225,69 @@ def main(
     mgr.load()
     show_rejected_list(mgr.state.rejected_plans)
 
-    # Prompt required: ask interactively if not provided via --prompt
-    if prompt is None:
-        console.print()
-        prompt = Prompt.ask(
-            "[bold]Enter your plan prompt[/bold]\n"
-            "[dim](e.g. 'Find any improvement and propose a plan')[/dim]"
-        )
-        if not prompt.strip():
-            console.print("[red]Prompt is required. Exiting.[/red]")
+    from .preset import list_presets, load_preset
+    from .display import _raw_input
+
+    # --preset=? : list available presets and exit
+    if preset == "?":
+        available = list_presets()
+        if not available:
+            console.print("[yellow]No presets found.[/yellow]")
+        else:
+            console.print("\n[bold]Available presets:[/bold]")
+            for p in available:
+                console.print(f"  [cyan]{p.name}[/cyan] — {p.description}")
+        raise typer.Exit(0)
+
+    # --preset=<name> : load preset (alone, or combined with --prompt)
+    if preset is not None:
+        loaded = load_preset(preset)
+        if loaded is None:
+            available = list_presets()
+            console.print(f"[red]Preset '{preset}' not found.[/red]")
+            if available:
+                names = ", ".join(p.name for p in available)
+                console.print(f"[dim]Available: {names}[/dim]")
             raise typer.Exit(1)
+        console.print(f"\n[bold green]Using preset:[/bold green] {loaded.title}")
+        if prompt is None:
+            prompt = loaded.prompt
+        else:
+            console.print("[dim]Combining preset with --prompt (preset first, then --prompt).[/dim]")
+            prompt = f"{loaded.prompt}\n\n{prompt}"
+
+    # No prompt and no preset: interactive flow
+    if prompt is None:
+        available = list_presets()
+
+        if available:
+            console.print("\n[bold]Available presets:[/bold]")
+            for p in available:
+                console.print(f"  [cyan]{p.name}[/cyan] — {p.description}")
+            console.print()
+
+        console.print("[bold]What kind of project is this?[/bold]")
+        console.print("[dim](framework, language, domain — e.g. Unity mobile game, Python backend API)[/dim]")
+        project_type = _raw_input(": ").strip()
+        if not project_type:
+            console.print("[red]Input is required. Exiting.[/red]")
+            raise typer.Exit(1)
+
+        console.print()
+        console.print("[bold]What areas should we focus on?[/bold]")
+        console.print("[dim](e.g. performance, code quality, bugs, architecture)[/dim]")
+        focus = _raw_input(": ").strip()
+
+        parts = [f"This is a {project_type} project."]
+        if focus:
+            parts.append(f"Focus on {focus}.")
+        else:
+            parts.append("Find general code improvements.")
+        prompt = " ".join(parts)
+
+    if not prompt.strip():
+        console.print("[red]Prompt is required. Exiting.[/red]")
+        raise typer.Exit(1)
 
     if auto:
         console.print(
@@ -156,12 +295,35 @@ def main(
             f"Plans will be saved to [bold]{effective_report_dir / 'pending'}[/bold]"
         )
 
-    # Session info always shown; throttle waiting when auto or --throttle
-    from .throttle import SessionThrottle
+    # Pct-based throttling driven by Anthropic's /api/oauth/usage utilization
+    # (session + weekly windows). Codex is subscription-based so its throttle
+    # is disabled; the engine instead waits for the reset time reported in
+    # Codex's usage-limit errors.
+    session_throttle = None
+    throttle_enabled = False
+    if backend == "claude":
+        from .throttle import SessionThrottle
 
-    session_throttle = SessionThrottle(
-        session_budget=session_budget,
-    )
+        weekly_pct = (
+            throttle_weekly_pct
+            if throttle_weekly_pct is not None
+            else throttle_target_pct
+        )
+        session_throttle = SessionThrottle(
+            target_session_pct=throttle_target_pct,
+            target_weekly_pct=weekly_pct,
+            disable_weekly=no_weekly_throttle,
+        )
+        throttle_enabled = not no_throttle
+    elif no_throttle is False:
+        console.print(
+            "[dim]Codex backend: cost throttle disabled "
+            "(relies on usage-limit reset times).[/dim]"
+        )
+    # session_budget is intentionally ignored (see its --help). Dropping the
+    # local name keeps a later reader from wondering why we read but never use
+    # it; the flag stays declared so persisted daemon args keep parsing.
+    del session_budget
 
     from .engine import run_discovery_loop
 
@@ -176,6 +338,14 @@ def main(
             console.print(f"[red]Invalid --stop-at format: {stop_at}. Use HH:MM.[/red]")
             raise typer.Exit(1)
 
+    # Echo the resolved effort so the user has visual confirmation that the
+    # flag actually reached plan-finder (and was understood). When omitted we
+    # stay silent — Claude CLI's own default is used.
+    if effort is not None and backend == "claude":
+        console.print(f"[dim]Reasoning effort: [bold]{effort.value}[/bold][/dim]")
+
+    effort_value: str | None = effort.value if effort is not None else None
+
     asyncio.run(
         run_discovery_loop(
             plan_prompt=prompt,
@@ -184,10 +354,13 @@ def main(
             cwd=cwd,
             auto=auto,
             throttle=session_throttle,
-            throttle_enabled=not no_throttle,
+            throttle_enabled=throttle_enabled,
             resume=not no_resume,
             stop_at=stop_at_time,
             model=model,
+            max_turns=max_turns,
+            backend=backend,
+            effort=effort_value,
         )
     )
 
