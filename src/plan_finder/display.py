@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
-
+from rich.prompt import Prompt
 from rich.spinner import Spinner
 from rich.table import Table
 
