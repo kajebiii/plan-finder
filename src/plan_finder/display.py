@@ -6,7 +6,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.markup import escape as rich_escape
 from rich.panel import Panel
-
+from rich.prompt import Prompt
 from rich.spinner import Spinner
 from rich.table import Table
 
@@ -223,6 +223,46 @@ def show_summary(approved: int, rejected: int, pending: int = 0) -> None:
     console.print(f"  Rejected: {rejected}")
     if pending:
         console.print(f"  Pending review: {pending}")
+
+
+def show_pending_plan(filepath: Path, index: int, total: int) -> None:
+    """Display a pending plan markdown file using rich Markdown rendering."""
+    from rich.markdown import Markdown
+
+    content = filepath.read_text(encoding="utf-8")
+    console.print()
+    console.print(
+        Panel(
+            Markdown(content),
+            title=f"[cyan]Pending Plan [{index}/{total}][/cyan]",
+            border_style="cyan",
+        )
+    )
+
+
+def ask_review_action() -> tuple[str, str]:
+    """Ask user to approve, reject, or skip a pending plan.
+
+    Returns (action, reason) where:
+      action: "approve" | "reject" | "skip"
+      reason: rejection reason (only for reject)
+    """
+    _flush_stdin()
+    console.print()
+    choice = Prompt.ask(
+        "[bold]Action[/bold] [dim](y=approve, n=reject, s=skip)[/dim]",
+        choices=["y", "n", "s"],
+        default="s",
+    )
+    if choice == "y":
+        return "approve", ""
+    if choice == "n":
+        reason = Prompt.ask(
+            "[dim]Rejection reason (optional, press Enter to skip)[/dim]",
+            default="",
+        )
+        return "reject", reason
+    return "skip", ""
 
 
 class LiveStatus:
