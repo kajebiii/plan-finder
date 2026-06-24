@@ -51,6 +51,12 @@ def _is_retriable_error(err_msg: str) -> bool:
         or "command failed" in lower
         or "connection" in lower
         or "timeout" in lower
+        # claude-agent-sdk wraps a CLI result with is_error=true into
+        # "Claude Code returned an error result: <subtype-or-errors>". The
+        # CLI occasionally emits is_error=true with subtype="success" and an
+        # empty errors[] mid-tool (e.g. a Bash invocation that gets cut off),
+        # which is transient — a fresh session on retry recovers.
+        or "returned an error result" in lower
     )
 
 
