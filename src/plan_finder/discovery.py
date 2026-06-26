@@ -105,6 +105,24 @@ async def discover_plan(
                         + u.get("cache_read_input_tokens", 0)
                         + u.get("cache_creation_input_tokens", 0)
                     )
+                if message.is_error:
+                    # CLI v2.1.110+ emits is_error=true with subtype="success"
+                    # and api_error_status set (e.g. 429 rate limit, 500/502/
+                    # 503/529 transient) when the underlying Anthropic API
+                    # call failed. The SDK's ProcessError wrapper falls back
+                    # to the subtype string when errors[] is empty, so the
+                    # engine would only see the unhelpful literal "success".
+                    # Pull every diagnostically useful field off ResultMessage
+                    # so the engine logs a single line a human can act on:
+                    #   - api_error_status: HTTP code (529/429/5xx)
+                    #   - subtype: error category (success/error_max_turns/...)
+                    #   - stop_reason: where the model halted (api_error/
+                    #     refusal/max_tokens/end_turn/tool_use)
+                    #   - num_turns: 1st turn rejection vs deep-context blow-up
+                    #   - duration_api_ms: fast reject vs long timeout
+                    #   - session_id: short prefix for resume tracking
+                    #   - errors[]: raw API error body (when present)
+                    raise RuntimeError(_format_result_error(message))
                 if message.subtype == "success" and message.structured_output:
                     plan = DiscoveredPlan.model_validate(message.structured_output)
 
@@ -114,6 +132,29 @@ async def discover_plan(
         )
 
     return await asyncio.wait_for(_run_query(), timeout=QUERY_TIMEOUT_SECONDS)
+
+
+def _format_result_error(msg: ResultMessage) -> str:
+    """Render a ResultMessage with is_error=true as a single diagnostic line.
+
+    Keep keys cheap to grep and values compact — the engine logs the first
+    ~120 chars, so put the most decisive fields (HTTP status, subtype,
+    stop_reason) first.
+    """
+    parts: list[str] = []
+    if msg.api_error_status:
+        parts.append(f"HTTP {msg.api_error_status}")
+    parts.append(f"subtype={msg.subtype!r}")
+    if msg.stop_reason:
+        parts.append(f"stop_reason={msg.stop_reason!r}")
+    parts.append(f"turn={msg.num_turns}")
+    parts.append(f"api_ms={msg.duration_api_ms}")
+    if msg.session_id:
+        parts.append(f"session={msg.session_id[:8]}")
+    if msg.errors:
+        joined = "; ".join(msg.errors)[:200]
+        parts.append(f"errors={joined!r}")
+    return "Claude API call failed: " + " | ".join(parts)
 
 
 def _summarize_tool(name: str, inp: dict) -> str:
