@@ -32,6 +32,10 @@ _RATE_LIMIT_PATTERNS = [
     "rate limit",
     "rate_limit",
     "overloaded",
+    # HTTP 429 surfaced by discovery._run_query() when the CLI's
+    # ResultMessage has api_error_status=429. Treated as session-level
+    # rate limiting (wait for next session), not a transient blip.
+    "http 429",
 ]
 
 MAX_CONSECUTIVE_ERRORS = 3
@@ -57,6 +61,12 @@ def _is_retriable_error(err_msg: str) -> bool:
         # empty errors[] mid-tool (e.g. a Bash invocation that gets cut off),
         # which is transient — a fresh session on retry recovers.
         or "returned an error result" in lower
+        # discovery._run_query() raises this for any ResultMessage with
+        # is_error=true so the HTTP status (429/5xx/529) is logged. All
+        # such failures are upstream API errors; 5xx is transient and 429
+        # is also caught by _is_rate_limit_error below — both paths are
+        # safe to retry.
+        or "claude api call failed" in lower
     )
 
 

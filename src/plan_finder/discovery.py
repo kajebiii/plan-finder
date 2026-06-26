@@ -105,6 +105,24 @@ async def discover_plan(
                         + u.get("cache_read_input_tokens", 0)
                         + u.get("cache_creation_input_tokens", 0)
                     )
+                if message.is_error:
+                    # CLI v2.1.110+ emits is_error=true with subtype="success"
+                    # and api_error_status set (e.g. 429 rate limit, 500/502/
+                    # 503/529 transient) when the underlying Anthropic API
+                    # call failed. The SDK's ProcessError wrapper falls back
+                    # to the subtype string when errors[] is empty, so the
+                    # engine sees the unhelpful literal "success". Raise
+                    # with the HTTP status surfaced so the engine logs an
+                    # actionable cause.
+                    errors_text = "; ".join(message.errors or []) or message.subtype
+                    if message.api_error_status:
+                        raise RuntimeError(
+                            f"Claude API call failed: HTTP "
+                            f"{message.api_error_status} ({errors_text})"
+                        )
+                    raise RuntimeError(
+                        f"Claude API call failed: {errors_text}"
+                    )
                 if message.subtype == "success" and message.structured_output:
                     plan = DiscoveredPlan.model_validate(message.structured_output)
 
