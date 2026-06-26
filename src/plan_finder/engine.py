@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 
 from rich.markup import escape as rich_escape
@@ -25,30 +26,56 @@ def _resolve_backend(backend: str):
 QUIET_START = 22  # 22:00
 QUIET_END = 3     # 03:00
 
-# Errors that indicate rate limit / session exhaustion
+# Errors that indicate rate limit / session exhaustion. Only consulted
+# for errors that do NOT carry an explicit HTTP status (legacy SDK wraps,
+# CLI text without api_error_status). When discovery surfaces an HTTP
+# status, _http_status_from_error() routes purely by code — keeping the
+# legacy "overloaded" text out of that path so a transient 529 doesn't
+# get a 5-hour session wait.
 _RATE_LIMIT_PATTERNS = [
     "hit your limit",
     "usage limit",
     "rate limit",
     "rate_limit",
     "overloaded",
-    # HTTP 429 surfaced by discovery._run_query() when the CLI's
-    # ResultMessage has api_error_status=429. Treated as session-level
-    # rate limiting (wait for next session), not a transient blip.
-    "http 429",
 ]
+
+# Matches the structured error raised by discovery._format_result_error()
+# (e.g. "Claude API call failed: HTTP 529 | ..."). When this captures a
+# status, we trust the code over textual patterns — 429 == rate limit,
+# everything else is retriable.
+_HTTP_STATUS_RE = re.compile(r"claude api call failed: http (\d+)", re.IGNORECASE)
 
 MAX_CONSECUTIVE_ERRORS = 3
 
 
+def _http_status_from_error(err_msg: str) -> int | None:
+    """Pull the HTTP status off a discovery-formatted API error, if any."""
+    m = _HTTP_STATUS_RE.search(err_msg)
+    return int(m.group(1)) if m else None
+
+
 def _is_rate_limit_error(err_msg: str) -> bool:
     """Check if error message indicates a rate limit."""
+    status = _http_status_from_error(err_msg)
+    if status is not None:
+        # We surfaced the HTTP code ourselves — trust it. Only 429 is a
+        # real rate limit; 5xx (incl. 529 overloaded) is transient and
+        # belongs on the retry path even if the API body happens to
+        # contain the word "overloaded".
+        return status == 429
     lower = err_msg.lower()
     return any(p in lower for p in _RATE_LIMIT_PATTERNS)
 
 
 def _is_retriable_error(err_msg: str) -> bool:
     """Check if error is likely retriable (e.g. exit code 1 from CLI)."""
+    status = _http_status_from_error(err_msg)
+    if status is not None:
+        # 5xx is transient — retry. 429 is also "retriable" in the sense
+        # that the engine should not break, but it's already routed via
+        # _is_rate_limit_error() above before reaching this branch.
+        return 500 <= status < 600 or status == 429
     lower = err_msg.lower()
     return (
         "exit code 1" in lower
@@ -61,11 +88,9 @@ def _is_retriable_error(err_msg: str) -> bool:
         # empty errors[] mid-tool (e.g. a Bash invocation that gets cut off),
         # which is transient — a fresh session on retry recovers.
         or "returned an error result" in lower
-        # discovery._run_query() raises this for any ResultMessage with
-        # is_error=true so the HTTP status (429/5xx/529) is logged. All
-        # such failures are upstream API errors; 5xx is transient and 429
-        # is also caught by _is_rate_limit_error below — both paths are
-        # safe to retry.
+        # discovery._run_query() raises this for ResultMessage.is_error=true
+        # cases without an HTTP status (e.g. subtype="error_max_turns").
+        # When a status *is* present, the HTTP branch above handles it.
         or "claude api call failed" in lower
     )
 
