@@ -167,6 +167,7 @@ async def run_discovery_loop(
     max_turns: int = 80,
     backend: str = "claude",
     effort: str | None = None,
+    retry_on_dry: int = 0,
 ) -> None:
     """Main discovery loop.
 
@@ -204,6 +205,10 @@ async def run_discovery_loop(
     session_id: str | None = None
     session_start_time = _dt.now()
     consecutive_errors = 0
+    # Tracks how many consecutive iterations ended in found_nothing=true.
+    # Reset whenever a real plan is discovered. Used by --retry-on-dry to
+    # probe with a fresh session before giving up.
+    consecutive_dry = 0
 
     try:
         while True:
@@ -382,9 +387,25 @@ async def run_discovery_loop(
                 continue
 
             if result.plan.found_nothing:
+                if consecutive_dry < retry_on_dry:
+                    consecutive_dry += 1
+                    display.console.print(
+                        f"\n[yellow]Model reported found_nothing. Probing again "
+                        f"with a fresh session "
+                        f"({consecutive_dry}/{retry_on_dry})...[/yellow]"
+                    )
+                    # Force a fresh session so the next iteration is not biased
+                    # by the prior turn's "nothing left" framing. Counts toward
+                    # --max like any other iteration.
+                    session_id = None
+                    session_start_time = _dt.now()
+                    continue
                 display.show_no_more_plans()
                 break
 
+            # A real plan came back — clear the dry-out streak so the next
+            # found_nothing again gets the full retry budget.
+            consecutive_dry = 0
             display.show_plan(result.plan, iteration)
 
             if auto:
