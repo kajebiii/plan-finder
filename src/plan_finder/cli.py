@@ -170,6 +170,17 @@ def main(
             help="Clear previously rejected plans before starting.",
         ),
     ] = False,
+    retry_on_dry: Annotated[
+        int,
+        typer.Option(
+            "--retry-on-dry",
+            help="When the model reports found_nothing=true, force up to N "
+            "more discovery iterations with a fresh session before stopping. "
+            "Each retry still counts toward --max. The counter resets every "
+            "time a real plan is found. Default 0 (stop on the first "
+            "found_nothing — current behavior).",
+        ),
+    ] = 0,
 ) -> None:
     """Discover improvement plans in the current codebase.
 
@@ -361,6 +372,7 @@ def main(
             max_turns=max_turns,
             backend=backend,
             effort=effort_value,
+            retry_on_dry=retry_on_dry,
         )
     )
 
