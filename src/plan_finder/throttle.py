@@ -61,6 +61,7 @@ class SessionThrottle:
         target_session_pct: float = DEFAULT_TARGET_PCT,
         target_weekly_pct: float = DEFAULT_TARGET_PCT,
         disable_weekly: bool = False,
+        disable_session: bool = False,
         oauth_client: ClaudeOAuthUsage | None = None,
     ) -> None:
         self.target_session_pct = target_session_pct
@@ -70,6 +71,11 @@ class SessionThrottle:
         # Useful when a user wants to grind through a project early in the
         # week without weekly time-proportional pacing blocking them.
         self.disable_weekly = disable_weekly
+        # Symmetric to disable_weekly: when True, the 5-hour session window
+        # is skipped so the throttle only paces the 7-day weekly window.
+        # Useful for overnight/scheduled runs that don't care about the
+        # session-level rate limit but still want to respect weekly caps.
+        self.disable_session = disable_session
         self._client = oauth_client or ClaudeOAuthUsage()
         self.last_snapshot: UsageSnapshot | None = None
         self.disabled_reason: str | None = None
@@ -163,7 +169,7 @@ class SessionThrottle:
         snapshot = self.last_snapshot
         if snapshot is None:
             return True
-        if not self._window_allowed(
+        if not self.disable_session and not self._window_allowed(
             snapshot.five_hour_pct,
             snapshot.five_hour_resets_at,
             _SESSION_WINDOW_SECS,
@@ -226,9 +232,13 @@ class SessionThrottle:
 
         # Indicator based on the worst (smallest, most negative) margin
         # between elapsed_pct and usage_pct * 1.05 across the windows we
-        # actually enforce. Skip weekly when it's been disabled.
+        # actually enforce. Skip either window when it's been disabled.
         margins = []
-        if s_pct is not None and snapshot.five_hour_resets_at is not None:
+        if (
+            not self.disable_session
+            and s_pct is not None
+            and snapshot.five_hour_resets_at is not None
+        ):
             margins.append(s_elapsed - s_pct * _PACE_MARGIN)
         if (
             not self.disable_weekly
@@ -246,12 +256,15 @@ class SessionThrottle:
         else:
             indicator = "🔴 Over"
 
-        s_part = (
-            f"Session {s_pct:.0f}% / time {s_elapsed:.0f}% "
-            f"(resets {_fmt_reset(snapshot.five_hour_resets_at)})"
-            if s_pct is not None
-            else "Session —"
-        )
+        if self.disable_session:
+            s_part = "Session: disabled"
+        elif s_pct is not None:
+            s_part = (
+                f"Session {s_pct:.0f}% / time {s_elapsed:.0f}% "
+                f"(resets {_fmt_reset(snapshot.five_hour_resets_at)})"
+            )
+        else:
+            s_part = "Session —"
         if self.disable_weekly:
             w_part = "Weekly: disabled"
         elif w_pct is not None:
@@ -314,20 +327,26 @@ class SessionThrottle:
         if snapshot is None:
             return _MIN_WAIT_SECS
         waits: list[float] = [0.0]
-        for pct, resets_at, duration, target in (
-            (
-                snapshot.five_hour_pct,
-                snapshot.five_hour_resets_at,
-                _SESSION_WINDOW_SECS,
-                self.target_session_pct,
-            ),
-            (
-                snapshot.seven_day_pct,
-                snapshot.seven_day_resets_at,
-                _WEEKLY_WINDOW_SECS,
-                self.target_weekly_pct,
-            ),
-        ):
+        windows: list[tuple[float | None, datetime | None, int, float]] = []
+        if not self.disable_session:
+            windows.append(
+                (
+                    snapshot.five_hour_pct,
+                    snapshot.five_hour_resets_at,
+                    _SESSION_WINDOW_SECS,
+                    self.target_session_pct,
+                )
+            )
+        if not self.disable_weekly:
+            windows.append(
+                (
+                    snapshot.seven_day_pct,
+                    snapshot.seven_day_resets_at,
+                    _WEEKLY_WINDOW_SECS,
+                    self.target_weekly_pct,
+                )
+            )
+        for pct, resets_at, duration, target in windows:
             if pct is None or resets_at is None:
                 continue
             secs_to_reset = max(
