@@ -122,6 +122,17 @@ def main(
             "you. Implies nothing if --no-throttle is also set.",
         ),
     ] = False,
+    no_session_throttle: Annotated[
+        bool,
+        typer.Option(
+            "--no-session-throttle",
+            help="Disable the 5-hour session window from the throttle while "
+            "keeping the 7-day weekly window active. Useful for overnight "
+            "or scheduled runs that don't care about the session-level rate "
+            "limit but still want weekly caps to apply. Implies nothing if "
+            "--no-throttle is also set.",
+        ),
+    ] = False,
     model: Annotated[
         Optional[str],
         typer.Option(
@@ -324,6 +335,7 @@ def main(
             target_session_pct=throttle_target_pct,
             target_weekly_pct=weekly_pct,
             disable_weekly=no_weekly_throttle,
+            disable_session=no_session_throttle,
         )
         throttle_enabled = not no_throttle
     elif no_throttle is False:
