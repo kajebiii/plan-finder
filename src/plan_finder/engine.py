@@ -238,7 +238,11 @@ async def run_discovery_loop(
             # if either session or weekly utilization has reached target.
             if throttle_enabled and throttle:
                 throttle.refresh()
-                await throttle.wait_if_needed()
+                # Passing stop_at lets the throttle bail out of a long
+                # weekly-reset wait (24h+) so the outer loop's --stop-at
+                # check on the next iteration break out instead of parking
+                # the daemon past the stop time.
+                await throttle.wait_if_needed(stop_at=stop_at)
 
             display.show_discovery_start(iteration)
             if throttle:
