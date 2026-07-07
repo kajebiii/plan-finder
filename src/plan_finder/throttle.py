@@ -37,6 +37,25 @@ _MIN_WAIT_SECS = 60
 _MAX_WAIT_SECS = 30 * 60
 
 
+def _seconds_until_stop_at(stop_at: object) -> float | None:
+    """Return seconds from now until the next occurrence of ``stop_at`` (a
+    ``datetime.time``), or None if the input has no ``hour``/``minute``.
+
+    Assumes ``stop_at`` is in the machine's local timezone. If the time has
+    already passed today the caller treats that as "already stopped" and
+    should not reach this helper (throttle.wait_if_needed checks first).
+    """
+    hour = getattr(stop_at, "hour", None)
+    minute = getattr(stop_at, "minute", None)
+    if hour is None or minute is None:
+        return None
+    now = datetime.now()
+    stop_dt = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if stop_dt <= now:
+        return 0.0
+    return (stop_dt - now).total_seconds()
+
+
 def _fmt_reset(d: datetime | None) -> str:
     """Compact display of a reset time relative to now."""
     if d is None:
@@ -185,11 +204,35 @@ class SessionThrottle:
             self.target_weekly_pct,
         )
 
-    async def wait_if_needed(self) -> None:
-        """Sleep until the throttle re-opens, then refresh."""
+    async def wait_if_needed(self, stop_at: object | None = None) -> None:
+        """Sleep until the throttle re-opens, then refresh.
+
+        ``stop_at`` (``datetime.time`` or None): if the wall clock passes this
+        local time while we are still throttled, return early so the engine's
+        outer loop can honor ``--stop-at`` instead of blocking indefinitely.
+        Without this, a wait for a weekly reset 24h+ away would keep the
+        daemon parked past ``--stop-at`` for the entire remaining window
+        (observed 07-07: the daemon sat in throttle wait 8+ hours past the
+        07:30 stop time until it was manually killed).
+        """
         while not self.is_allowed():
+            if stop_at is not None and datetime.now().time() >= stop_at:
+                display.console.print(
+                    f"\n[yellow]Reached stop time "
+                    f"({stop_at.strftime('%H:%M')}) during throttle wait. "
+                    f"Yielding to the engine.[/yellow]"
+                )
+                return
             wait_secs = self._seconds_until_allowed()
             wait_secs = max(_MIN_WAIT_SECS, min(_MAX_WAIT_SECS, wait_secs))
+            # If ``stop_at`` is closer than the throttle's own re-check
+            # interval, clamp the sleep so we wake up exactly at ``stop_at``
+            # instead of overshooting and detecting the stop time only after
+            # the next scheduled refresh.
+            if stop_at is not None:
+                secs_until_stop = _seconds_until_stop_at(stop_at)
+                if secs_until_stop is not None:
+                    wait_secs = min(wait_secs, secs_until_stop)
             snapshot = self.last_snapshot
             now_str = datetime.now().strftime("%H:%M:%S")
             s_pct = snapshot.five_hour_pct or 0
