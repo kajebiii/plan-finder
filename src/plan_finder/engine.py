@@ -243,6 +243,22 @@ async def run_discovery_loop(
                 # check on the next iteration break out instead of parking
                 # the daemon past the stop time.
                 await throttle.wait_if_needed(stop_at=stop_at)
+                # wait_if_needed yields to us when stop_at passes, but the
+                # top-of-loop stop-at check has already run for THIS
+                # iteration — falling through would call discover_plan()
+                # past the stop time (observed 07-08: iter 1 kicked off at
+                # 07:29, hit weekly hard cap, and only stopped after a
+                # rate-limit round-trip). Re-check now so the run ends
+                # cleanly at the stop time without any API calls.
+                if stop_at:
+                    from datetime import datetime
+                    if datetime.now().time() >= stop_at:
+                        display.console.print(
+                            f"\n[yellow]Reached stop time "
+                            f"({stop_at.strftime('%H:%M')}) after throttle "
+                            f"wait. Stopping.[/yellow]"
+                        )
+                        break
 
             display.show_discovery_start(iteration)
             if throttle:
